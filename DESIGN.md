@@ -59,11 +59,112 @@ a reply to an expired turn still gets taken into account. Concrete rules:
    daily nudge exists to keep this fair.
 5. Multiplayer/idle-player AI driving (Phase 4) reuses these rules verbatim.
 
-## 2. Turn structure (stub — next session)
-Per-turn flow from the design notes (gather → yes/no mutations → narrative
-→ advance time → update), mapped to schema operations in
-`research/phase0-world-state-schema.md`. Needs: fixed game-clock turn
-length, daily-nudge wording policy, what "done" means per turn.
+## 2. Turn structure (LOCKED 2026-09-26)
+
+### 2.1 Turn length and cadence
+- One turn = a fixed `turn_len_min` game-clock minutes, set per scenario.
+  Default: **60** (the design notes' ~1h game time).
+- Reconciles the design-notes flow step "set the time length of the turn":
+  the length is fixed by scenario config, not chosen per turn; that step is
+  now "advance the clock by the fixed length".
+- Real-world pacing is player-driven: every inbound player email runs one
+  turn. If no player input and no turn has run in the last ~24h of real
+  time, the server runs an idle turn (GM conservative default, §1.3). Net
+  effect: ~1 email/player/day for active games, never exceeding the
+  protocol's 1:1 inbound cap plus the daily idle turn.
+- Playtest tempo (hourly emails, daylight hours) is a scenario config
+  (`idle_turn_interval_h`), not a protocol change.
+- `game_clock_min` advances only when turns run. ~30 daily turns ≈ ~30
+  game-hours ≈ the design notes' "about a month" game.
+
+### 2.2 The five-step pipeline (contract)
+The design-notes agentic flow, with a per-step contract (schema operations
+in `research/phase0-world-state-schema.md`; embodied in
+`prototype/world_state_demo.py`, to be factored into a shared `run_turn()`
+in Phase 2):
+
+1. **Gather** — SELECT the current place, the actors there, and the objects
+   in those places and inventories. Elapsed-time reconciliation runs first
+   (turns since `last_touched_turn` → passive mutations), so the GM reasons
+   from fresh state.
+2. **Yes/no mutations** — the GM emits `mutation_questions`; every proposed
+   state change is a yes/no question with rationale. Approved effects land
+   as `mutations` rows. Denied actions keep their `no` row (auditable) with
+   rationale and an optional partial effect ("chips the bark instead").
+3. **Narrative** — one `narrative` string on the `turns` row, composed from
+   the approved mutations plus the catch-up line. Rendered per §5; must
+   pass the secrecy check (§2.5.5).
+4. **Advance time** — `games.game_clock_min += turn_len_min`;
+   `games.turn_no += 1`.
+5. **Update** — UPDATE touched rows' JSON state, stamp their
+   `last_*_turn` to the new turn, INSERT new assets, INSERT the `turns`
+   row.
+
+Serial per game: at most one turn runs at a time. Inbound that arrives
+while a turn is running is queued and folded into the *next* turn's gather
+step (same rule as late replies: never dropped, never raced).
+
+Player input extraction: `turns.player_input` is the email body minus the
+`Game code: <GUID>` footer line. Attachments are ignored in the MVP
+(logged, not acted on).
+
+### 2.3 Idle turns and the daily touch
+- An idle turn is a normal turn whose `player_input` reads "idle default";
+  the GM drives the player's actor with a conservative default (§1.3).
+- The idle-turn email leads with the catch-up line and ends with an open
+  prompt — it *is* the day's "still your move" touch. No separate "are you
+  there?" email while idle turns are running.
+- Standalone nudge (fallback only): fires if an active game went ≥24h of
+  real time with **no turn email at all** (idle-turn pipeline down, or a
+  scenario that disables idle turns). It advances nothing and mutates
+  nothing; at most one per 24h per game.
+
+### 2.4 Nudge wording policy (structural — prose style is Neil's eye)
+Nudges and catch-ups carry constraints, not style (the prose itself is a
+review checkpoint under §5):
+1. Never reveal anything from `hidden_traits` or `plot_concept` — only
+   established, player-visible facts.
+2. The catch-up line is mandatory whenever the player missed frames since
+   their last input. Format: `While you were quiet: <1–2 concrete events>.`
+   Each event must be auditable against `mutations` rows since the player's
+   last input turn.
+3. End with an open question or concrete choice ("What do you do?",
+   "Follow the trail or go back for the bottle?") — never a demand, never
+   invented urgency the world state doesn't support.
+4. ≤120 words for a standalone nudge. No guilt-tripping, no manufactured
+   FOMO.
+5. Dead or ended game: no nudges, ever.
+
+### 2.5 Per-turn done criteria
+A turn is done only when ALL of these hold:
+1. `turns` row written: turn_no, game-clock window
+   `[start, start+turn_len_min)`, player_input (or "idle default"),
+   mutation_questions JSON, narrative, created_at.
+2. **No silent mutations**: every state change the turn made has a
+   `mutations` row with old/new values and a cause (an adjudication
+   question, "elapsed-time reconciliation", or "late reply to turn N").
+3. Clock advanced: `games.game_clock_min` and `games.turn_no`
+   incremented; all touched rows' `last_*_turn` stamped to the new turn.
+4. Outbound email: exactly one sent (the turn email; or the standalone
+   nudge if the fallback fired). It carries the `Game code: <GUID>` footer,
+   the `[ATFL <8hex>]` subject tag, and Gmail threading headers.
+5. **Secrecy check**: the rendered narrative contains nothing from
+   `hidden_traits`/`plot_concept` (MVP: string-level check against a
+   GM-side denylist built from the gathered entities' hidden JSON).
+6. Catch-up lead: if the player missed frames since their last input, the
+   email opens with the §2.4 catch-up line.
+7. Death/ending: if the turn killed the player, `status='dead'`,
+   `ended_at` set, and the scheduler never runs another turn or nudge for
+   that game.
+
+### 2.6 Turn failure handling
+- A turn that can't complete (GM produced no usable output, send failed):
+  retry once with the same inputs.
+- After two failures: no invented fiction goes to the player. The turn is
+  marked failed (logged; surfaced in the daily digest for Neil), and the
+  next inbound or idle-turn slot starts a fresh turn.
+- Partial state is never emailed: a turn email goes out only when every
+  §2.5 criterion holds.
 
 ## 3. World model (stub)
 Schema locked in Phase 0 (`research/phase0-world-state-schema.md`).
@@ -94,7 +195,24 @@ with Neil by email. Needs: the acceptance checklist.
   dropped; catch-up line leads every turn email.
 - UUID4 lowercase hex GUIDs; `[ATFL <8-hex>]` subject tag; footer
   `Game code: <GUID>` line; Gmail threading headers preserved.
+- Turn length fixed per scenario, default 60 game-min (`turn_len_min`
+  config) — reconciles the design-notes "set the time length" step, which
+  is now "advance the clock by the fixed length". Real-world pacing is
+  player-driven + one idle turn per ~24h; ~1 email/day for active games.
+- Idle-turn email doubles as the daily touch (catch-up lead + open prompt);
+  standalone nudges are fallback-only, ≤1 per 24h per game, mutate nothing,
+  and follow a structural wording policy (no spoilers, catch-up auditable
+  against mutations, ≤120 words, no guilt).
+- Turns are serial per game; mid-turn inbound is queued into the next
+  turn's gather. Per-turn done criteria: turns row + no silent mutations +
+  clock advanced + exactly one outbound email with GUID/threading +
+  secrecy check + catch-up lead + death handling. Failed turns retry
+  once, then are logged and surfaced in the digest — never send invented
+  fiction.
+- Narrative prose style is deliberately unspecified here — it's a review
+  checkpoint for Neil's eye under the renderer spec (§5).
 
 ## Open questions for Neil
-None new — protocol questions are answered by the design notes; the
-standing ones (game email account, GM model) stand.
+None new — the turn-structure questions are answered by the design notes +
+the decisions above; the standing ones (game email account, GM model)
+stand.
