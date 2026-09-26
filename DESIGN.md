@@ -485,10 +485,107 @@ improvise a sixth concept to resolve a stuck game.
 - Multiplayer actor claims (Phase 4) — the GM's arbiter role scales
   there; the MVP contract here is single-player.
 
-## 5. Renderer spec (stub)
-Phase 2 MVP is text-first by plan. Needs: what a turn email looks like
-(text layout, footer, map-as-text placeholder) before Phase 3's
-three-part image composite.
+## 5. Renderer spec (LOCKED 2026-09-26)
+
+Text-first renderer for the Phase 2 MVP; Phase 3's three-part image composite
+(scene / map / selfie) layers on top without changing this contract. Neil's
+design notes say "images over text (Qwen prose is banal)" and "renderer could
+start as text" — so: the text email always carries the *complete* turn (all
+game facts, never image-only), images are additive. Prose *style* is not
+specified here — it is Neil's eye (review checkpoint: turn-1 intro draft,
+session #5, still open).
+
+### 5.1 Body format
+- **text/plain only** for the MVP. No HTML: reliable across mail clients,
+  nothing to break, and the Phase 3 images attach as plain MIME image
+  attachments rather than inline HTML. One outbound email per turn (§2.5.4),
+  images included.
+- Monospace blocks (indented or fenced) render fine in plain text clients;
+  the map block (§5.4) assumes monospace.
+
+### 5.2 Turn email layout (fixed block order)
+```
+[subject] [ATFL <8hex>] Above the Fog Line      (set once at game start; later
+                                                 turns reply in-thread so the
+                                                 subject stays constant)
+
+Day {N} · {HH:MM} · {time-of-day word}            (canonical game-clock line,
+                                                 from time_of_day(t); e.g.
+                                                 "Day 1 · 07:00 · morning")
+
+<catch-up lead, one line, mandatory>             (§1.3.3 — auditable against
+                                                 the mutations ledger; omitted
+                                                 only on turn 1, nothing to
+                                                 catch up on)
+
+<narrative: the GM's prose for this turn>        (target ≤400 words; the four
+                                                 turn-1 facts, beat work,
+                                                 parsed player intent, etc.)
+
+--- Known places ---                              (map-as-text block, §5.4;
+<monospace map>                                   present from Phase 3's
+                                                  image composite onward as the
+                                                  client-proof fallback;
+                                                  MVP may ship the simple list
+                                                  variant)
+
+Carrying: <compact inventory line>                (e.g. "hands empty ·
+                                                  backpack empty"; §3.2 slots)
+
+<open prompt — ends with a question>              (§2.4: always an open
+                                                 question, never a guessable
+                                                 menu)
+
+---
+Game code: <GUID>                                 (§1.1 — footer, always last)
+Turn {N} · Day {d}, {HH:MM}
+```
+- A literal template with a filled turn-1 example lives at
+  `prototype/turn_email_layout.txt`; the Python renderer in Phase 2 fills it
+  verbatim. Example prose there is illustration only — not locked.
+- **What the renderer receives:** the *filtered* world state (§4.4 — no
+  `hidden_traits` key at all), the turn's narrative, the catch-up line, and
+  the prompt. It cannot leak what it never sees.
+- **Secrecy gate (§2.5.5):** after rendering, substring-check the body against
+  every value in the game's `hidden_traits` JSON (denylist); a hit fails the
+  turn — the email is NOT sent (§2.6: retry once, then surface in the digest).
+
+### 5.3 The other email types (system voice, never in-character)
+GM fiction goes only in turn emails. Everything else is plain, honest system
+text — no narration, no spoilers, no mechanics talk:
+- **Standalone nudge** (fallback-only, ≤1/24h, §2.3): ≤120 words, structural
+  policy per §2.4. Sent as a thread reply. Mutates nothing.
+- **Clarification** (ambiguous inbound, §1.1): fresh thread,
+  subject `[ATFL] Couldn't match your game`. Body: "I got your message but
+  couldn't match it to a game. Reply with the Game code from a previous
+  email, or email <game address> to start a new game." No fiction, no retry
+  of the player's intent.
+- **Death / game-end**: the final turn email follows the §5.2 layout (it is a
+  turn), but the prompt is replaced by an explicit closer: "This was your
+  last email. The game is over." No nudges follow (§2.4 — no dead-game
+  nudges); a reply starts a new game.
+- **Threading**: turn/nudge/death emails set `In-Reply-To`/`References` to
+  the previous message so each game is one Gmail thread (§1.1). Clarification
+  starts a new thread; if the player replies to it with a code, the resolved
+  game continues on its own thread.
+
+### 5.4 Map-as-text block (placeholder → Phase 3)
+- MVP variant: a simple discovered-places list under `--- Known places ---`,
+  one line per place: `trailhead (where you are)`.
+- Rule: only **discovered** places render in full. Visible-but-undiscovered
+  places (§3.2) render as one-line hints with no detail
+  (`fog-below — visible below, not yet visited`). Undiscovered + invisible
+  places never render — the renderer never sees them (§5.2).
+- Phase 3 replaces this block with the three-part image composite (scene,
+  rough time/space map, selfie — time-of-day aware per §3.1); the text map
+  stays as the fallback for clients that block images and as the audit
+  surface. Same discovery rule applies to the image map.
+
+### 5.5 Turn-length target
+- Turn narrative target ≤400 words (a constraint for the GM, not a hard
+  gate — the done criteria in §2.5 are the hard gates). Standalone nudges
+  are hard-capped at 120 words (§2.4). Rationale: one email a day has to be
+  *read*; short beats long when the image composite lands in Phase 3.
 
 ## 6. MVP "done" criteria (stub)
 A playable game over email: start by email → turns flow → GUID-threaded
@@ -532,6 +629,12 @@ with Neil by email. Needs: the acceptance checklist.
   lean: "the fog is wrong itself" (earth changing) — closest to Neil's
   Silent Hill ocean-of-fog origin. Hidden stats gate step-2 yes/no
   claims; hidden changes go through the same mutation ledger.
+- Renderer (text-first MVP): text/plain body, fixed §5.2 block order
+  (clock line → catch-up lead → narrative → map block → inventory line →
+  open prompt → GUID footer); the text email always carries the complete
+  turn, Phase 3 images are additive attachments. System emails
+  (nudge/clarification/death) are never in-character. Text map block
+  doubles as the Phase 3 image fallback and the audit surface.
 
 ## Open questions for Neil
 - (standing) Game's free Google account / spare address for the MVP turn

@@ -1,0 +1,93 @@
+# Above the Fog Line — turn email layout template (text/plain)
+# Companion to DESIGN.md §5 (renderer spec). The Phase 2 renderer fills this
+# template verbatim. {placeholders} are substituted per turn; everything else
+# is literal. Example prose in the filled example is ILLUSTRATION ONLY — the
+# turn-1 draft is still waiting on Neil's eye (session #5 checkpoint).
+
+=== TEMPLATE ================================================================
+
+Subject: [ATFL {guid8}] Above the Fog Line
+In-Reply-To: {prev_message_id}          # game start: absent (starts the thread)
+References: {message_id_chain}          # game start: absent
+
+Day {day_n} · {clock_hh_mm} · {time_of_day}
+{catch_up_lead}                          # mandatory from turn 2; omitted on turn 1
+
+{narrative}                              # GM prose, target ≤400 words
+
+--- Known places ---
+{map_block}                              # discovered places in full; visible-but-
+                                         # undiscovered as one-line hints; never
+                                         # undiscovered+invisible
+
+Carrying: {inventory_line}
+
+{open_prompt}                            # ends with a question; death/game-end
+                                         # replaces this with the closer line
+
+---
+Game code: {guid}
+Turn {turn_n} · Day {day_n}, {clock_hh_mm}
+
+=== FILLED EXAMPLE: turn 1 (fog-line-mystery-v1 seed state) =================
+# Values from DESIGN.md §3.2. GUID is fictional. Prose: example only, not locked.
+
+Subject: [ATFL 3f2a9c11] Above the Fog Line
+
+Day 1 · 07:00 · morning
+
+Morning. 7:00.
+
+You come over the ridge and the world drops away: below you, an ocean
+of fog, still as held breath, reaching every horizon. The trail is
+empty. It has been empty all morning.
+
+Your cheek is wet. One red drop, like rain — except it isn't raining.
+The sky above you is clear.
+
+At your feet: a water bottle, half full, cap off. Nobody in sight.
+
+The trail goes two ways — switchbacks climbing the ridge behind you,
+and one steep descent that drops straight toward the fog.
+
+--- Known places ---
+trailhead (where you are)
+trail-up — not yet explored
+trail-down — not yet explored
+fog-below — visible below, not yet visited
+
+Carrying: hands empty · backpack empty
+
+What do you do?
+
+---
+Game code: 3f2a9c11-7b4d-4f2e-9a1c-5d6e7f8a9b0c
+Turn 1 · Day 1, 07:00
+
+=== SYSTEM EMAIL EXAMPLES ===================================================
+
+--- standalone nudge (thread reply, ≤120 words, mutates nothing) ---
+Subject: Re: [ATFL 3f2a9c11] Above the Fog Line
+
+Day 1 · 07:00 · morning
+
+While you were quiet: nothing changed. The fog is still holding its
+breath below the ridge; the bottle sits where you left it.
+
+The trail still goes two ways. What do you do?
+
+---
+Game code: 3f2a9c11-7b4d-4f2e-9a1c-5d6e7f8a9b0c
+Turn 1 · Day 1, 07:00
+
+--- clarification (fresh thread, no fiction) ---
+Subject: [ATFL] Couldn't match your game
+
+I got your message but couldn't match it to a game. Reply with the
+Game code from a previous email, or email <game address> to start a new
+game.
+
+--- death / game end (final turn; the prompt becomes the closer) ---
+<same layout as a turn, ending with:>
+
+This was your last email. The game is over.
