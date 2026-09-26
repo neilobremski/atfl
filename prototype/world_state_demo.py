@@ -24,7 +24,7 @@ CREATE TABLE games (
     guid TEXT PRIMARY KEY,
     player_email TEXT NOT NULL,
     scenario_id TEXT NOT NULL,
-    plot_concept TEXT NOT NULL,
+    plot_concept TEXT,  -- NULL until the GM picks one at game start (DESIGN §3.3)
     status TEXT NOT NULL DEFAULT 'active',
     turn_no INTEGER NOT NULL DEFAULT 0,
     game_clock_min INTEGER NOT NULL DEFAULT 0,
@@ -104,25 +104,39 @@ def j(x):
 
 
 def seed(db):
+    """DESIGN.md §3 seed: scenario 'fog-line-mystery-v1' at turn 0 (07:00)."""
     c = db.cursor()
     now = datetime.now(timezone.utc).isoformat()
     c.execute(
         "INSERT INTO games VALUES (?,?,?,?,?,?,?,?,?)",
         ("GUID-FOG-0001", "neil@example.com", "fog-line-mystery-v1",
-         "a spell — the fog is a boundary, not weather", "active", 0, 0, now, None),
+         None, "active", 0, 0, now, None),
     )
-    c.execute(
-        "INSERT INTO places (slug,name,description,physical_state,hidden_traits) VALUES (?,?,?,?,?)",
+    for slug, name, desc, phys, disc in [
         ("trailhead", "Trail above the fog line",
          "A narrow trail cresting a ridge. Below, an ocean of fog stretches to the horizon.",
-         j({"fog_density": 0.9, "light": "dusk", "temp_c": 8, "wind": "light"}),
-         j({"ward_line": True, "ward_note": "nothing from below has crossed in 40 years"})),
-    )
+         {"fog_density_local": 0.0, "fog_below": True, "light": "morning",
+          "temp_c": 8, "wind": "light", "ground": "damp gravel", "trail_empty": True}, 1),
+        ("trail-down", "The trail descends toward the fog.",
+         "One steep descent drops straight toward the fog.",
+         {"fog_density": 0.4, "light": "morning"}, 0),
+        ("trail-up", "Switchbacks climb the ridge, away from the fog.",
+         "Switchbacks climb behind you, away from the fog.",
+         {"fog_density": 0.0, "light": "morning"}, 0),
+        ("fog-below", "The ocean of fog below the ridge.",
+         "The fog ocean below the ridge — visible, never entered.",
+         {"fog_density": 1.0}, 0),
+    ]:
+        c.execute(
+            "INSERT INTO places (slug,name,description,physical_state,hidden_traits,discovered,last_visited_turn) VALUES (?,?,?,?,?,?,?)",
+            (slug, name, desc, j(phys), j({}), disc, 0),
+        )
     c.execute(
         "INSERT INTO actors (slug,name,kind,is_player,location_slug,physical_state,hidden_traits,inventory) VALUES (?,?,?,?,?,?,?,?)",
         ("player-neil", "You", "player", 1, "trailhead",
-         j({"hp": 1.0, "hunger": 0.2, "fatigue": 0.3, "wetness": 0.0, "pose": "standing", "facing": "down-trail"}),
-         j({"plot_hook": "marked — the red drop chose him"}),
+         j({"hp": 1.0, "hunger": 0.2, "fatigue": 0.3, "wetness": 0.0,
+            "cold": 0.2, "pose": "standing", "facing": "down-trail"}),
+         j({}),
          j(EMPTY_INVENTORY)),
     )
     c.execute(
@@ -130,15 +144,15 @@ def seed(db):
         ("water-bottle", "Water bottle",
          "A half-full bottle sitting on an otherwise empty trail.",
          j({"water_ml": 400, "cap_on": False, "tipped": False}),
-         j({}), "place:trailhead"),
+         j({"unexplained": True, "owner": None}), "place:trailhead"),
     )
     c.execute(
         "INSERT INTO objects (slug,name,description,physical_state,hidden_traits,holder) VALUES (?,?,?,?,?,?)",
         ("red-drop", "A red drop",
-         "A single red drop on the player's cheek. It wasn't raining.",
-         j({"volume_ml": 0.05, "dried": False}),
-         j({"origin": "not blood, not rain — the fog condensing wrong"}),
-         "actor:player-neil:hands[0]"),
+         "A single red drop on the player's cheek. It isn't raining.",
+         j({"volume_ml": 0.05, "color": "red", "wet": True, "dried": False}),
+         j({"unexplained": True}),
+         "actor:player-neil:cheek"),  # on-body holder spot, DESIGN §3.2
     )
     db.commit()
 

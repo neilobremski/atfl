@@ -166,10 +166,115 @@ A turn is done only when ALL of these hold:
 - Partial state is never emailed: a turn email goes out only when every
   §2.5 criterion holds.
 
-## 3. World model (stub)
-Schema locked in Phase 0 (`research/phase0-world-state-schema.md`).
-Needs: the fixed mystery scenario's initial state — places, actors,
-objects seeded for turn 1.
+## 3. Scenario seed: "fog-line-mystery-v1" (LOCKED 2026-09-26)
+
+The fixed mystery for the Phase 2 single-player MVP. Seed = turn 0 state:
+the trailhead above the fog, the player, the water bottle, the red drop —
+the design notes' opening ("the perfect start to a mystery"). All
+mechanics below are locked; the plot concept and the intro prose are not
+(see §3.4).
+
+### 3.1 Scenario config
+- `scenario_id`: `fog-line-mystery-v1`
+- `turn_len_min`: 60 (one game-hour per turn; §2.1)
+- Game clock: `game_clock_min = 0` ↔ **07:00 local**. Config
+  `day_start_min_of_day: 420`; time-of-day for any game time `t` is
+  `(420 + t) % 1440`. The renderer (§5) and later the video/sound
+  pipeline (Phase 5) are time-of-day aware off this function.
+- **Morning, not dusk.** The prototype demo seeded dusk; morning
+  supersedes it — the fog is a morning phenomenon, and the design notes'
+  origin is a bright morning over an ocean of fog.
+- `plot_concept`: **NULL at seed** — the GM picks one from the §4 roster
+  at game start, before composing the turn-1 narrative. The prototype's
+  demo value ("a spell") was a placeholder, never canon.
+
+### 3.2 Seed entities (turn 0 — before any turn runs)
+
+`games` row: scenario_id `fog-line-mystery-v1`, plot_concept NULL,
+status `active`, turn_no 0, game_clock_min 0. (GUID and player_email are
+assigned per signup; §1.1.)
+
+**places**
+
+1. `trailhead` — "Trail above the fog line" — *discovered=1,
+   last_visited_turn=0*
+   - physical_state: `{fog_density_local: 0.0, fog_below: true,
+     light: "morning", temp_c: 8, wind: "light", ground: "damp gravel",
+     trail_empty: true}` — locally clear above the line; the ocean of
+     fog is *below*, visible but not present.
+   - hidden_traits: `{}` — the GM seeds place secrets at plot pick (§4).
+
+2. `trail-down` — "The trail descends toward the fog." — *discovered=0*
+   - physical: `{fog_density: 0.4, light: "morning"}`; hidden: `{}`.
+
+3. `trail-up` — "Switchbacks climb the ridge, away from the fog." —
+   *discovered=0* — physical: `{fog_density: 0.0, light: "morning"}`;
+   hidden: `{}`.
+
+4. `fog-below` — "The ocean of fog below the ridge." — *discovered=0*
+   (visible from the trailhead, never entered) —
+   physical: `{fog_density: 1.0}`; hidden: `{}`.
+
+**actors**
+
+- `player` — name "You", kind `player`, is_player=1,
+  location `trailhead`, last_acted_turn=0
+  - physical_state: `{hp: 1.0, hunger: 0.2, fatigue: 0.3, wetness: 0.0,
+    cold: 0.2, pose: "standing", facing: "down-trail"}`
+  - hidden_traits: `{}` — GM assigns hidden player stats at plot pick
+    (conventions in §4).
+  - inventory: `{"hands": [null, null], "backpack": [null × 8]}`
+    (fixed slots; the composite image shows hands + backpack, §5/Phase 3).
+
+**objects**
+
+- `water-bottle` — "Water bottle" — holder `place:trailhead`
+  - description: "A half-full bottle sitting on an otherwise empty trail."
+  - physical_state: `{water_ml: 400, cap_on: false, tipped: false}`
+  - hidden_traits: `{unexplained: true, owner: null}` — facts the GM
+    knows are unknown; the answers belong to the plot, not the seed.
+
+- `red-drop` — "A red drop" — holder **`actor:player:cheek`**
+  - description: "A single red drop on the player's cheek. It isn't
+    raining."
+  - physical_state: `{volume_ml: 0.05, color: "red", wet: true,
+    dried: false}`
+  - hidden_traits: `{unexplained: true}` — the origin is the plot's
+    business (§4); the seed records only that it has none yet.
+  - Holder-extension (locked): `holder` allows `actor:<slug>:<body-spot>`
+    for on-body positions outside inventory slots (`cheek`, `shoulder`,
+    …). Hands/backpack slots stay strictly for the fixed-slot inventory.
+
+Both objects are covered by elapsed-time reconciliation (§2.2): an open
+bottle evaporates, a wet drop dries — already demo'd in
+`prototype/world_state_demo.py`.
+
+### 3.3 Turn-1 rules (structural — prose is Neil's eye)
+
+1. **The signup email IS turn 1's player_input** (e.g. "start", or the
+   player's first words). All §2.5 done criteria apply: the turn-1
+   outbound email is the intro, carrying the GUID footer and subject tag
+   from turn 1 — the 1:1 inbound/outbound invariant starts immediately.
+2. The GM picks `plot_concept` from the §4 roster *before* composing the
+   turn-1 narrative and records the pick in turn 1's update step
+   (a `mutations` row with entity_type `game`, field `plot_concept`,
+   cause "plot pick at game start").
+3. Turn-1 narrative duties (structural, not style): establish the four
+   player-verifiable facts — (a) above the fog, fog ocean below;
+   (b) the trail is empty; (c) half-full bottle, cap off, at your feet;
+   (d) red drop on your cheek, not raining — name the two trail
+   directions and the fog below; end with an open question. The email
+   must pass the secrecy check (§2.5.5): no hint of hidden_traits or
+   plot_concept.
+
+### 3.4 Deferred (not in the seed, not this session)
+
+- The **plot-concept roster + beat pacing** — §4.
+- **The intro email's prose** — a draft sits in the progress log under
+  "Waiting on Neil's eye" (2026-09-26); Neil's read drives the renderer
+  spec (§5).
+- The red drop's origin and the bottle's owner — these are answers, and
+  answers live in the GM's plot, never in the seed.
 
 ## 4. GM rules and plot-concept roster (stub)
 GM: hard rules, D&D dungeon-master style, R4T roster agent. Picks one plot
