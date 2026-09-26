@@ -19,6 +19,17 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 
+# DESIGN.md §4.3 roster: the five plot concepts from Neil's design notes.
+# The demo uses Murph's lean ("earth-changing"); the real pick is Neil's call.
+PLOT_ROSTER = [
+    "aliens",
+    "government-project",
+    "you-are-dead",
+    "a-spell",
+    "earth-changing",
+]
+DEMO_PLOT_PICK = "earth-changing"  # default until Neil calls the mystery
+
 SCHEMA = """
 CREATE TABLE games (
     guid TEXT PRIMARY KEY,
@@ -259,6 +270,17 @@ def run_turn(db, player_input, turn_len_min=60):
     print("[gather] place=trailhead, actors=player, objects=" + ", ".join(objs))
     for line in reconcile_elapsed_time(db, turn_id, turn_no):
         print(line)
+
+    # 1b. turn-1 plot pick (DESIGN §3.3.2 / §4.1): the GM commits to ONE
+    # roster concept before composing the turn-1 narrative; the pick is a
+    # game-level mutation (entity_id 0 = the game row), never changed after.
+    if turn_no == 1:
+        pick = DEMO_PLOT_PICK
+        assert pick in PLOT_ROSTER, f"plot pick {pick!r} not on the §4.3 roster"
+        db.execute("UPDATE games SET plot_concept=? WHERE guid=?", (pick, g["guid"]))
+        mutate(db, turn_id, "game", 0, "plot_concept", None, pick,
+               "plot pick at game start")
+        print(f"[plot pick] GM commits to plot_concept={pick!r}")
 
     # 2. yes/no mutations
     gathered = {"places": {"trailhead": place}, "actors": {"player-neil": actor}, "objects": objs}

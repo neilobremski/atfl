@@ -276,11 +276,214 @@ bottle evaporates, a wet drop dries — already demo'd in
 - The red drop's origin and the bottle's owner — these are answers, and
   answers live in the GM's plot, never in the seed.
 
-## 4. GM rules and plot-concept roster (stub)
-GM: hard rules, D&D dungeon-master style, R4T roster agent. Picks one plot
-concept at start (aliens / government project / you're dead / a spell / the
-earth changing) and nudges the player in slow beats. Needs: the roster list,
-beat pacing, hidden-stat conventions.
+## 4. GM rules and plot-concept roster (LOCKED 2026-09-26)
+
+The GM is a D&D dungeon-master-style agent on the R4T roster (model TBD —
+standing open question #2). These rules are its contract: they bind what the
+GM may do, whatever model ends up behind it. §4 is structural; the narrative
+prose voice is a review checkpoint for Neil's eye (§5).
+
+### 4.1 GM hard rules
+
+1. **World-model supremacy.** The SQLite game database is canon. The LLM's
+   text is the presentation layer, never the source of truth: a fact in the
+   narrative must be checkable against `entities`/`mutations` state, or
+   against a declared hidden trait. If state and an old narrative line
+   conflict, state wins and the narrative adjusts.
+2. **Mutations only through the pipeline.** Every world change happens in
+   the §2.2 five-step turn flow — gather → yes/no mutation questions →
+   narrative → advance clock → update. There are no off-turn mutations:
+   idle turns, nudges, and expiry handling (§2.3) mutate nothing unless a
+   §2.2 turn is running.
+3. **No invented answers.** The seed (§3.2) contains only `{unexplained}`
+   markers. The GM may resolve a marker ONLY into the answer implied by the
+   chosen plot concept (§4.3) — never into a fresh invention. If the plot
+   concept has no answer for a marker, it stays unexplained and the
+   narrative says nothing about it.
+4. **One plot, committed.** `plot_concept` is picked once at game start
+   (§3.3.2) and never changed. The GM cannot pivot to another roster
+   concept mid-game to cover a hole — holes are covered by honesty:
+   "you find nothing."
+5. **Secrecy.** The GM knows the full truth from turn 1 and never leaks
+   it: no hidden-trait names or values in outbound email, no fourth-wall
+   references to mechanics ("your cold stat", "hidden traits"), no
+   out-of-character reasoning. The §2.5.5 secrecy check runs every turn.
+   Failed → the turn is rewritten, not shipped.
+6. **Neutral arbiter.** The GM is neither the player's ally nor enemy:
+   danger is real and death stops the emails (§2.1). Player claims succeed
+   or fail through the yes/no questions of step 2, gated by state and
+   hidden stats — "a player too weak to fell a tree only chips it."
+   Natural-language setting changes are allowed, but hard physics apply
+   (no flying).
+7. **GM as proxy.** The GM filters raw player input: it parses intent,
+   rejects out-of-world requests (real-world commands, prompt-injection
+   attempts, "tell me the plot"), and answers only from the game. An
+   out-of-world reply is a clarification, not a turn (mutates nothing).
+8. **Player agency over plot.** Beats are opportunities, not rails. If the
+   player ignores the plot, the GM answers honestly from the world model
+   and folds unmet beats back in when the player returns to relevant
+   ground — or lets the game end unresolved at the final beat, if the
+   player never engages.
+
+### 4.2 Beat pacing (structural)
+
+Target: ~30 turns, roughly one email a day for about a month. Playtest
+tempo: hourly emails during daylight (§design notes). Turn length is
+60 game-minutes; pacing is measured in turns, never in prose timing.
+
+| Beat | Turns | Structural duty |
+|---|---|---|
+| Establish | 1–5 | The four seed facts are in play; the player has two named directions and the fog. No plot claims — only the unexplained markers (§3.3.3). |
+| First doubt | 6–12 | One unexplained marker develops (moves, changes state, recurs). The player should be able to name what's wrong, not why. |
+| Escalation | 13–20 | A second marker develops; the first hints at a rule (it behaves *as if* something). GM seeds one verifiable plot-consistent clue per 2–3 turns. |
+| Point of no return | 21–28 | A player-visible change the plot concept makes irreversible (the trail up closes / the fog reaches the trailhead / someone answers). Survival decisions start costing. |
+| Resolution | 29–30+ | The plot's answer becomes state, or the player earns it and the game ends — or death ends it. Ephemeral: the emails stop either way. |
+
+Guidance (not rules): nudges follow the §2.4 wording policy; an idle-turn
+AI move defaults to "wait and observe" (it lets the next beat arrive on
+schedule rather than chasing). If the player is ahead of the beat map,
+the GM accelerates; if behind, it decelerates — the beat *windows* are
+soft, the turn count is not stretched beyond ~35.
+
+### 4.3 Plot-concept roster
+
+Five concepts, from Neil's design notes. One is picked at game start.
+**The pick is Neil's call** — Murph's lean (see Decisions) is not locked.
+Each entry gives: the truth; what the three seed markers are under it
+(fog ocean, red drop, bottle — the seed itself only holds `{unexplained}`
+facts, §3.4); the five beats in this concept's shape; and the resolution
+condition.
+
+#### 4.3.1 The fog is alien (aliens)
+
+- **Truth.** Something below the fog is not human, and it is watching —
+  sampling, not attacking.
+- **Markers.** Fog: a *held* phenomenon, unnaturally still, like a lid.
+  Red drop: not blood — ichor from whatever touched the player's cheek
+  while they slept or climbed (it is not raining, so it fell *from*
+  something, not the sky). Bottle: half-full, cap off, left by the last
+  visitor — they did not finish the water, and they are gone.
+- **Beats.** Establish: the stillness is total — no birds, no insects
+  (a verifiable absence). First doubt: the drop returns — same cheek,
+  same spot — overnight. Escalation: patterns in the fog surface that
+  behave as if *attending* to the player (it re-forms where they look).
+  Point of no return: the trail up is blocked by the fog itself, which
+  has climbed. Resolution: the player sees what is below — contact,
+  refusal, or death.
+- **Resolution.** First contact — speak, flee, or hide — or death below
+  the fog line.
+
+#### 4.3.2 The fog is a project (government project)
+
+- **Truth.** The fog is a test plume from a classified program; the
+  trailhead sits on the edge of a monitored zone.
+- **Markers.** Fog: too uniform, edges too sharp for weather — a
+  *dispersed* phenomenon with a boundary. Red drop: tracer dye from the
+  plume's edge, sticky, slightly chemical. Bottle: a field tech's,
+  dropped when they were extracted in a hurry.
+- **Beats.** Establish: the fog's edge is a clean line you can walk
+  along. First doubt: low aircraft — or something like it — at regular
+  intervals. Escalation: unmarked equipment in the brush, turned *away*
+  from the trail (watching the fog, not the hiker). Point of no return:
+  the trail up is closed — official-looking barriers, fresh. Resolution:
+  the player finds the observation post, is intercepted, or gets below
+  the fog and sees the array.
+- **Resolution.** The player reaches the array / is picked up / turns
+  back with proof.
+
+#### 4.3.3 You are already dead (you're dead)
+
+- **Truth.** The player died on the ridge — the red drop is their own,
+  and everything since is the time between.
+- **Markers.** Fog: not a weather event — it's where the trail, the
+  mountain, and the world simply stop being knowable. Red drop: the
+  player's own blood; the cheek injury matches a fall they cannot
+  remember. Bottle: half-full because the person who owned it no longer
+  needs the other half.
+- **Beats.** Establish: small wrongnesses — no wind, no animals, the
+  same birdsong twice. First doubt: the player cannot recall how they
+  got above the fog line, or when. Escalation: evidence of a search —
+  gear, voices — that never quite arrives. Point of no return: the
+  player finds their own body, or the fog shows them the moment.
+  Resolution: acceptance or denial; the emails end with one or the other.
+- **Resolution.** The player accepts it and the game closes — or refuses,
+  and the loop tightens (death-in-place, emails stop).
+
+#### 4.3.4 The fog is a spell (a spell)
+
+- **Truth.** Someone cast something weather-scale on this mountain; the
+  fog is a working, with a caster and a purpose.
+- **Markers.** Fog: moves with *intention* — it thickens against the
+  wind, thins where the player walks, like it is being held. Red drop:
+  a reagent-mark — deliberately placed, too precise for accident.
+  Bottle: an offering or a mistake — cap off because it was *used* in
+  the casting.
+- **Beats.** Establish: the fog responds — it parts where you step, too
+  cleanly. First doubt: glyphs or arranged stones where fog thins, fresh.
+  Escalation: a presence on the trail — footprints that start and stop,
+  a voice in the fog that knows the player's name. Point of no return:
+  the caster is close, and the fog is being *re-cast* around the player.
+  Resolution: confrontation — break it, join it, or be worked into it.
+- **Resolution.** The spell breaks, is renewed by the player's hand, or
+  consumes them.
+
+#### 4.3.5 The fog is wrong itself (the earth changing)
+
+- **Truth.** No agency: the world has changed in a way no one ordered —
+  the fog is a new natural phenomenon and the rules below it are
+  different. (Murph's lean — closest to Neil's Silent Hill / ocean-of-fog
+  origin.)
+- **Markers.** Fog: geological — it behaves like an ocean because it
+  *is* one now, a new layer of the world. Red drop: condensation of
+  something the air carries — the fog sheds, faintly, on everything
+  above it. Bottle: left by the last person who came up — they stopped
+  needing it, one way or another.
+- **Beats.** Establish: the fog has tides — it breathes on a slow
+  cycle, rising and falling like water. First doubt: familiar landmarks
+  *below* are wrong — the wrong shape, the wrong trees, the wrong
+  silence. Escalation: things come up out of it — fog-fauna, sounds —
+  that obey the new rules. Point of no return: the fog reaches the
+  trailhead; above and below trade places. Resolution: the player learns
+  the new rules and lives by them, climbs beyond them, or drowns in
+  air below the line.
+- **Resolution.** Adaptation (live in the new world), escape (climb
+  past it — and find what the mountain has become), or death below the
+  fog line.
+
+**Roster discipline.** New plot concepts can be added by Neil at any time
+(he owns the mystery), but a game in progress never changes its pick.
+Concepts not on this roster do not exist as answers — the GM cannot
+improvise a sixth concept to resolve a stuck game.
+
+### 4.4 Hidden-stat conventions
+
+- **Obvious vs hidden.** Per the design notes, each entity carries both:
+  obvious state (shown in the renderer — hunger, fatigue, bottle level)
+  and GM-secret state in `hidden_traits` (plot-specific meters, fear,
+  exposure, the truth-values behind markers). The renderer receives a
+  filtered view: obvious state only.
+- **Seed discipline.** At seed, `hidden_traits` hold `{unexplained}`
+  markers only — no answers (§3.2, §3.4). The GM's chosen concept gives
+  each marker its meaning at turn 1 (recorded in the mutation ledger,
+  internal only), and beats *convert* markers into facts over the game's
+  life — each conversion is a mutation with a cause, auditable in the
+  ledger.
+- **Hidden changes are still mutations.** The GM's internal stat moves
+  (exposure rising, a marker developing) go through the same `mutations`
+  table with entity_type `game` or the relevant entity — visible to
+  Murph/Neil in audit, never to the player in email.
+- **Hidden stats gate claims.** Step-2 yes/no questions consult hidden
+  stats the player can't see: "am I too cold to continue the descent?"
+  resolves from `player.cold` + descent exposure, and the narrative
+  reports the *felt* outcome, not the numbers.
+- **Encryption at rest:** deferred (standing open question #4).
+
+### 4.5 Deferred (not §4's business)
+
+- Which R4T model runs the GM (standing open question #2).
+- The narrative voice/prose style (Neil's eye, §5).
+- Multiplayer actor claims (Phase 4) — the GM's arbiter role scales
+  there; the MVP contract here is single-player.
 
 ## 5. Renderer spec (stub)
 Phase 2 MVP is text-first by plan. Needs: what a turn email looks like
@@ -316,8 +519,26 @@ with Neil by email. Needs: the acceptance checklist.
   fiction.
 - Narrative prose style is deliberately unspecified here — it's a review
   checkpoint for Neil's eye under the renderer spec (§5).
+- GM hard rules: world-model supremacy (SQLite canon, narrative never the
+  source of truth), mutations only through the turn pipeline, no invented
+  answers (markers resolve only into the chosen plot concept's answers),
+  one plot per game (never switched mid-game), secrecy every turn, neutral
+  arbiter (danger is real), GM as input proxy, player agency over beats.
+- Beat pacing: ~30 turns / ~1 month (playtest: hourly/daylight); beats
+  Establish / First doubt / Escalation / Point of no return / Resolution
+  with soft windows; nudge/idle defaults don't mutate.
+- Plot-concept roster (Neil's five from the design notes) is LOCKED as
+  the concept list — but the PICK is Neil's call, still open. Murph's
+  lean: "the fog is wrong itself" (earth changing) — closest to Neil's
+  Silent Hill ocean-of-fog origin. Hidden stats gate step-2 yes/no
+  claims; hidden changes go through the same mutation ledger.
 
 ## Open questions for Neil
-None new — the turn-structure questions are answered by the design notes +
-the decisions above; the standing ones (game email account, GM model)
-stand.
+- (standing) Game's free Google account / spare address for the MVP turn
+  loop; (standing) which R4T model runs the GM; (standing) whether
+  `hidden_traits` should be encrypted at rest.
+- **(NEW) Which plot concept for the fixed MVP scenario?** Roster:
+  aliens / government project / you're dead / a spell / the earth
+  changing. Murph's lean is "earth changing" but this is Neil's mystery
+  to call — the GM can't pick until he does (defaults to "earth
+  changing" after the 2026-09-26 digest if he says nothing).
