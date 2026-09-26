@@ -587,10 +587,125 @@ text — no narration, no spoilers, no mechanics talk:
   are hard-capped at 120 words (§2.4). Rationale: one email a day has to be
   *read*; short beats long when the image composite lands in Phase 3.
 
-## 6. MVP "done" criteria (stub)
-A playable game over email: start by email → turns flow → GUID-threaded
-thread → world state persists → death/ending stops the emails. Playtest
-with Neil by email. Needs: the acceptance checklist.
+## 6. MVP "done" criteria (LOCKED 2026-09-26)
+
+The Phase 2 MVP is *done* when all three hold: the build passes the
+acceptance checklist (§6.2), Neil has played it over email (§6.3), and
+the exit criteria are met (§6.4). Completing §6 completes Phase 1:
+DESIGN.md is the Phase 1 output and is now locked (the intro prose and
+plot pick remain Neil's open checkpoints, not design stubs).
+
+### 6.1 Playtest entry criteria
+
+Phase 2 must not call itself playable until it can actually run. Before
+the Neil playtest starts, the build must have:
+
+1. **A live game address.** The game's dedicated free Google account
+   exists and is connected (standing open question #1), and the poller
+   on the Oracle VM reads it every few minutes.
+2. **A GM behind the pipeline.** Some R4T-roster model answers the
+   step-2 yes/no adjudications and step-3 narratives (standing open
+   question #2). A mock GM may prove the plumbing, but the playtest runs
+   against the real one.
+3. **A plot pick.** One §4.3 concept chosen by Neil (open question #3;
+   defaults to "earth changing" after the 2026-09-26 digest if he says
+   nothing). The scenario seed (§3.2) is loaded verbatim; `plot_concept`
+   goes from NULL to the pick on turn 1.
+4. **Server up.** The turn loop (§2.2) + poller + sender all run on the
+   Oracle VM (`free-micro-1`) or a declared fallback, with the daily
+   digest surfacing turn failures (§2.6).
+
+### 6.2 Acceptance checklist
+
+Each item below is verifiable by an end-to-end email run, not by code
+review. The build passes when every box holds.
+
+**Start**
+- [ ] A plain email to the game address (e.g. "start") creates a new
+      game: a UUID4 GUID, one `<GUID>.db` file seeded exactly per §3.2,
+      and a turn-1 email sent back within minutes.
+- [ ] The turn-1 email establishes the four §3.3.3 player-verifiable
+      facts (fog ocean below / empty trail / half-full bottle cap off /
+      red drop on cheek, not raining), names the two trail directions
+      and the fog, ends with an open question, and passes the secrecy
+      check (§2.5.5).
+
+**Turn flow**
+- [ ] A player reply runs exactly one turn: gather → yes/no mutations →
+      narrative → advance clock → update, with all §2.5 done criteria
+      (turns row, no silent mutations, clock advanced, one outbound
+      email, secrecy check, catch-up lead when frames were missed).
+- [ ] The reply content is honored: intent parsed from natural language
+      (§4.1.7); denied claims get a `no` row with rationale + partial
+      effect (§2.2.2).
+- [ ] Two turns at the same game are serial; a reply arriving mid-turn
+      queues into the next turn's gather — never dropped, never raced.
+- [ ] A late reply (after its turn ran) is folded into the next turn
+      with a `late reply to turn N` audit mark (§1.3.2).
+
+**GUID threading and identity**
+- [ ] Every outbound email carries `Game code: <GUID>` in the body
+      footer and the `[ATFL <8hex>]` subject tag; replies thread as one
+      Gmail conversation per game (§1.1, §5.3).
+- [ ] An ambiguous inbound (no GUID, multiple active games for the
+      sender) gets the clarification email (§5.3) — the wrong game is
+      never mutated.
+- [ ] Attachments are logged, never acted on (§2.2).
+
+**State persistence**
+- [ ] World state survives between turns and server restarts: the same
+      `<GUID>.db` file, the mutations ledger showing every change with
+      cause (§2.5.2), elapsed-time reconciliation firing on idle objects
+      (the demo'd bottle-evaporates/drop-dries case).
+- [ ] Failed turns (§2.6) retry once, then send nothing invented — the
+      failure is logged and surfaced in the digest.
+
+**Idle and death**
+- [ ] ~24h with no player input runs an idle turn: conservative default,
+      catch-up lead, open prompt (§2.3) — and it counts as the day's
+      "still your move" touch.
+- [ ] Player death sets `status='dead'` / `ended_at`; no further turns
+      or nudges go out, ever (§2.4.5, §2.5.7). The final email carries
+      the §5.3 closer.
+
+**No fiction outside turns**
+- [ ] Standalone nudges (§2.3) fire only as the fallback, ≤1/24h/game,
+      ≤120 words, mutate nothing, reveal nothing hidden (§2.4).
+- [ ] No system email is ever in-character (§5.3).
+
+### 6.3 The Neil playtest
+
+- Neil plays the MVP by email at playtest tempo (hourly emails, daylight
+  hours per the design notes) for a day or more — enough turns to see
+  the pipeline work: at least one parsed intent, one denied claim with a
+  `no` row, one idle turn with catch-up lead, and the full §5.2 email
+  layout landing in his inbox.
+- Playtest goals are subjective, so they are Neil's reads, recorded
+  after: does the turn pacing feel right? Is the narrative voice close
+  to the turn-1 draft checkpoint (session #5)? Are beats arriving or is
+  it wandering? These reads steer Phase 2 iteration, not new features.
+- Every turn is captured server-side (per-turn stats: mutations count,
+  GM latency, secrecy-check passes/fails, send latency) — the design
+  notes' dogfooding hook. The MVP ships the stats rows; dashboards are
+  later.
+
+### 6.4 Exit criteria (MVP → Phase 3)
+
+- [ ] All §6.2 boxes checked on a real end-to-end run.
+- [ ] Neil's playtest done; his reads logged as checkpoints (not as
+      blocking new features unless the mechanics are broken).
+- [ ] The `<GUID>.db` + mutations ledger + turn emails are the archive
+      of the playtest — inspectable, exportable, no special tooling.
+- [ ] Known deferred items are still deferred: Phase 3 image pipeline
+      (composite), Phase 4 actors/multiplayer, Phase 5 video — none
+      sneaked into the MVP.
+
+### 6.5 Deferred (not §6's business)
+
+- The plot pick and turn-1 intro prose (Neil's checkpoints; open
+  questions #3 and the "Waiting on Neil's eye" item).
+- The game's email identity (#1) and the GM model (#2) — entries in
+  §6.1, decisions in Neil's hands.
 
 ## Decisions (2026-09-26)
 - GUID+sender-address join; clarification email instead of guessing on
@@ -635,13 +750,23 @@ with Neil by email. Needs: the acceptance checklist.
   turn, Phase 3 images are additive attachments. System emails
   (nudge/clarification/death) are never in-character. Text map block
   doubles as the Phase 3 image fallback and the audit surface.
+- MVP "done" = acceptance checklist (start → turn flow → GUID threading
+  → state persistence → idle/death rules → no fiction outside turns) +
+  a Neil playtest at hourly/daylight tempo + playtest entry criteria
+  (live game address, real GM, plot pick, server up). Completing §6
+  completes Phase 1: DESIGN.md is locked. The plot pick and the turn-1
+  intro prose are Neil's open checkpoints, not design stubs — the MVP
+  build proceeds on the "earth changing" default if he says nothing.
 
 ## Open questions for Neil
 - (standing) Game's free Google account / spare address for the MVP turn
-  loop; (standing) which R4T model runs the GM; (standing) whether
-  `hidden_traits` should be encrypted at rest.
+  loop — blocks the playtest entry criteria (§6.1), not the Phase 2
+  build itself.
+- (standing) Which R4T model runs the GM — same: needed for the playtest,
+  not for prototyping the loop.
 - **(NEW) Which plot concept for the fixed MVP scenario?** Roster:
   aliens / government project / you're dead / a spell / the earth
   changing. Murph's lean is "earth changing" but this is Neil's mystery
-  to call — the GM can't pick until he does (defaults to "earth
-  changing" after the 2026-09-26 digest if he says nothing).
+  to call — the MVP defaults to the lean after the 2026-09-26 digest if
+  he says nothing.
+- (standing) Whether `hidden_traits` should be encrypted at rest (later).
