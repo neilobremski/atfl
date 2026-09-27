@@ -48,6 +48,7 @@ def run_once(gmail, gm, cfg):
         gm=gm,
         game_address=cfg["game_address"],
         turn_len_min=cfg["turn_len_min"],
+        images={"mode": cfg["images_mode"], "api_key": cfg["image_api_key"]},
     )
     sent = result.get("sent", [])
     nudged = result.get("nudged", [])

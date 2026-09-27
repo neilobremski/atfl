@@ -16,6 +16,12 @@ the free-micro-1 layout; override with env vars locally.
     ATFL_TURN_LEN_MIN   game-turn length, minutes (default 60 — DESIGN.md §2.1)
     ATFL_GM             'mock' (default) or 'real'. 'real' raises until
                         open question #2 (R4T GM model) is closed.
+    ATFL_IMAGES         'off' (default), 'stub' or 'real'. 'stub' wires the
+                        deterministic placeholder provider into turn emails;
+                        'real' raises until the image API key exists (open
+                        question #6).
+    ATFL_IMAGE_API_KEY  key for the real image provider. Not set until
+                        open question #6 closes.
 """
 import os
 
@@ -54,6 +60,16 @@ def load(env=os.environ):
     except ValueError:
         raise ConfigError("ATFL_TURN_LEN_MIN must be a positive integer (minutes).")
 
+    images_mode = env.get("ATFL_IMAGES", "off").strip().lower()
+    if images_mode not in ("off", "stub", "real"):
+        raise ConfigError(
+            f"ATFL_IMAGES must be 'off', 'stub' or 'real', got {images_mode!r}")
+    image_api_key = env.get("ATFL_IMAGE_API_KEY", "").strip() or None
+    if images_mode == "real" and not image_api_key:
+        raise ConfigError(
+            "ATFL_IMAGES=real needs ATFL_IMAGE_API_KEY set — the image key "
+            "is still open question #6. Refusing to start half-wired.")
+
     return {
         "games_dir": env.get("ATFL_GAMES_DIR", DEFAULT_GAMES_DIR),
         "token_path": env.get("ATFL_TOKEN_PATH", DEFAULT_TOKEN_PATH),
@@ -61,6 +77,8 @@ def load(env=os.environ):
         "poll_min": poll_min,
         "turn_len_min": turn_len_min,
         "gm": gm,
+        "images_mode": images_mode,
+        "image_api_key": image_api_key,
     }
 
 

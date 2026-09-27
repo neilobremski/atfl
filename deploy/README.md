@@ -12,7 +12,7 @@ the games dir (game SQLite files + mailer.db).
 | `/srv/atfl/atfl` | git checkout of github.com/neilobremski/atfl |
 | `/srv/atfl/venv` | Python venv (requirements.txt installed) |
 | `/var/lib/atfl/games` | game SQLite files + `mailer.db` (per-game thread state + seen-set) |
-| `/etc/atfl/atfl.env` | service env: ATFL_GAME_ADDRESS, ATFL_POLL_MIN, ATFL_TURN_LEN_MIN, ATFL_GM, ATFL_GAMES_DIR, ATFL_TOKEN_PATH |
+| `/etc/atfl/atfl.env` | service env: ATFL_GAME_ADDRESS, ATFL_POLL_MIN, ATFL_TURN_LEN_MIN, ATFL_GM, ATFL_GAMES_DIR, ATFL_TOKEN_PATH, ATFL_IMAGES, ATFL_IMAGE_API_KEY |
 | `/etc/atfl/token.json` | authorized_user OAuth JSON for the game's Gmail account (0600, `atfl:atfl`) |
 | `/etc/systemd/system/atfl.service` | the unit (this dir's `atfl.service`) |
 
@@ -36,6 +36,11 @@ ATFL_TURN_LEN_MIN=60
 ATFL_GM=mock
 ATFL_GAMES_DIR=/var/lib/atfl/games
 ATFL_TOKEN_PATH=/etc/atfl/token.json
+# Phase 3 images (composite per turn email): off | stub | real.
+# 'stub' wires deterministic placeholder panels (dev); 'real' needs the
+# key (OQ#6) and refuses to start without it.
+ATFL_IMAGES=off
+ATFL_IMAGE_API_KEY=
 ```
 
 `/etc/atfl/token.json`: the game's Gmail `authorized_user` OAuth JSON

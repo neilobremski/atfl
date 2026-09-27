@@ -20,6 +20,7 @@ Rules enforced here, not elsewhere:
     window, never in-character, mutates nothing in the world tables.
 """
 import base64
+import logging
 import os
 import sqlite3
 import time
@@ -100,8 +101,9 @@ def extract_text_body(raw_bytes):
 
 
 def build_raw(from_addr, to_addr, subject, body,
-              in_reply_to=None, references=None):
-    """RFC822 bytes for a text/plain send, with optional threading.
+              in_reply_to=None, references=None, attachments=None):
+    """RFC822 bytes for a text/plain send, with optional threading and
+    attachments. attachments: [(filename, data_bytes, mimetype)].
 
     Sets an explicit Message-ID (Gmail preserves a supplied one): the
     mailer threads on RFC Message-IDs, never on Gmail API ids."""
@@ -115,6 +117,11 @@ def build_raw(from_addr, to_addr, subject, body,
     if references:
         m["References"] = references
     m.set_content(body)
+    for filename, data, mimetype in (attachments or []):
+        maintype, _, subtype = mimetype.partition("/")
+        m.add_attachment(data, maintype=maintype or "application",
+                         subtype=subtype or "octet-stream",
+                         filename=filename)
     return m.as_bytes()
 
 
@@ -203,12 +210,15 @@ def _sent_rfc_id(sent):
     return sent.get("message_id") or sent["id"]
 
 
-def send_outcome(games_dir, gmail, outcome, inbound, game_address=GAME_ADDRESS):
+def send_outcome(games_dir, gmail, outcome, inbound, game_address=GAME_ADDRESS,
+                 attachments=None):
     """Map one DispatchOutcome to Gmail (or to nothing).
 
     inbound is the normalized poll dict for the triggering message —
     its header_message_id becomes In-Reply-To for turn 1 (no thread
-    state yet). Returns the sent message id, or None when nothing sent.
+    state yet). attachments ride on turn emails only (the Phase 3
+    composite); clarification/nudge stay text-only per §5.3. Returns the
+    sent message id, or None when nothing sent.
     """
     if outcome.action in ("failed", "ignored"):
         return None  # §2.6: nothing leaves on failure
@@ -220,7 +230,8 @@ def send_outcome(games_dir, gmail, outcome, inbound, game_address=GAME_ADDRESS):
                        or inbound.get("header_message_id"))
         refs = _chain(state.get("thread_refs"), in_reply_to)
         raw = build_raw(game_address, to_addr, outcome.subject,
-                        outcome.body, in_reply_to, refs or None)
+                        outcome.body, in_reply_to, refs or None,
+                        attachments=attachments)
         t0 = time.perf_counter()
         sent = gmail.send(base64.urlsafe_b64encode(raw).decode())
         send_ms = (time.perf_counter() - t0) * 1000.0
@@ -354,9 +365,44 @@ def _store_seen(games_dir, message_ids):
         db.close()
 
 
+def _turn_attachments(games_dir, outcome, images_cfg):
+    """Phase 3: build the turn's composite image for a turn_email
+    outcome. Returns ([(filename, jpeg, "image/jpeg")], note_or_None).
+
+    Any failure → empty attachments and a note; the text-only turn
+    still sends (§2.6: images never fail a turn). Only turn emails get
+    composites; clarify/nudge/failed stay text-only.
+    """
+    if (not images_cfg) or images_cfg.get("mode") in (None, "off") \
+            or outcome.action != "turn_email":
+        return [], None
+    try:
+        from .images import build_provider, build_turn_composite, ImageError
+        provider = build_provider(images_cfg.get("mode"),
+                                  images_cfg.get("api_key"))
+        if provider is None:
+            return [], None
+        comp = build_turn_composite(games_dir, outcome.guid,
+                                    outcome.turn_no, provider)
+        return ([(f"turn-{outcome.turn_no}-composite.jpg", comp["jpeg"],
+                  "image/jpeg")],
+                f"composite attached ({comp['time_of_day']}, "
+                f"ref={'kept' if comp['character_ref_used'] else 'new'})")
+    except Exception as e:
+        # log, never raise: text carries the complete turn
+        logging.getLogger("atfl.mailer").warning(
+            "images skipped for guid=%s turn=%s: %s",
+            outcome.guid, outcome.turn_no, e)
+        return [], f"images skipped ({type(e).__name__}: {e})"
+
+
 def run_poll_cycle(games_dir, gmail, gm, game_address=GAME_ADDRESS,
-                   seen_ids=None, turn_len_min=60):
+                   seen_ids=None, turn_len_min=60, images=None):
     """One full mailer cycle: poll -> dispatch -> send -> mark read.
+
+    images: {"mode": "off"/"stub"/"real", "api_key": ...} or None.
+    The composite attaches to turn emails only; any image failure is
+    noted, never raised (the text-only turn still sends).
 
     seen_ids persists across cycles within a process; the on-disk
     seen-set (mailer.db in games_dir) persists across restarts, so a
@@ -383,10 +429,13 @@ def run_poll_cycle(games_dir, gmail, gm, game_address=GAME_ADDRESS,
     for m, out in zip(fresh, outcomes):
         if out.guid and m.get("attachments"):
             log_attachments(games_dir, out.guid, m)
-        sent_id = send_outcome(games_dir, gmail, out, m, game_address)
+        attachments, img_note = _turn_attachments(games_dir, out, images)
+        sent_id = send_outcome(games_dir, gmail, out, m, game_address,
+                               attachments=attachments)
+        note = "; ".join(n for n in (out.note, img_note) if n) or None
         sent.append({"sender": out.sender, "action": out.action,
                      "guid": out.guid, "turn_no": out.turn_no,
-                     "message_id": sent_id, "note": out.note})
+                     "message_id": sent_id, "note": note})
         try:
             gmail.mark_read(m["id"])
         except Exception:

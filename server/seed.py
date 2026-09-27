@@ -12,6 +12,16 @@ EMPTY_INVENTORY = {"hands": [None, None], "backpack": [None] * 8}
 SCENARIO_ID = "fog-line-mystery-v1"
 TURN_LEN_MIN = 60  # one game-hour per turn (DESIGN §3.1)
 
+# Fixed scenario geography: adjacency pairs for the deterministic map
+# panel (Phase 3). Edges are scenario truth, not world state — the map
+# renderer filters them to discovered places only, so hidden geography
+# can never leak (§5, images.py).
+EDGES = [
+    ("trail-up", "trailhead"),
+    ("trailhead", "trail-down"),
+    ("trail-down", "fog-below"),
+]
+
 
 def _j(x):
     return json.dumps(x)
