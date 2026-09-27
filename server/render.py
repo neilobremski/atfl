@@ -89,6 +89,26 @@ def render_turn_email(guid, view, result, player_location_slug="trailhead"):
     return subject, "\n".join(blocks)
 
 
+def render_nudge(guid):
+    """§5.3 standalone nudge (fallback only): plain system voice, ≤120
+    words, never in-character, no mechanics talk. Sent as a thread
+    reply; mutates nothing. Prose itself is a review checkpoint (§5) —
+    this wording is placeholder structure per §2.4, not locked copy."""
+    guid8 = guid.replace("-", "")[:8]
+    subject = f"[ATFL {guid8}] Above the Fog Line"
+    body = ("\n".join([
+        "Still here — your game is waiting whenever you are.",
+        "",
+        "Nothing has changed in the world since your last turn; the fog",
+        "is exactly where you left it. Reply to this email with what you",
+        "do next, and include your Game code if you start a fresh message.",
+        "",
+        f"Game code: {guid}",
+    ]))
+    assert len(body.split()) <= 120
+    return subject, body
+
+
 def render_clarification(reason):
     """§5.3 clarification: fresh thread, plain and honest, never in-
     character. reason explains why the inbound couldn't be matched —

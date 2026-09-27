@@ -14,7 +14,11 @@ CREATE TABLE games (
     status TEXT NOT NULL DEFAULT 'active',
     turn_no INTEGER NOT NULL DEFAULT 0,
     game_clock_min INTEGER NOT NULL DEFAULT 0,
-    started_at TEXT, ended_at TEXT
+    started_at TEXT, ended_at TEXT,
+    -- mailer bookkeeping (DESIGN §1.1/§5.3): one Gmail thread per game
+    thread_message_id TEXT,  -- Gmail id of our last outbound email
+    thread_refs TEXT,        -- References chain for the next reply
+    last_email_at TEXT       -- when we last sent anything for this game
 );
 CREATE TABLE places (
     id INTEGER PRIMARY KEY,
@@ -88,4 +92,15 @@ def create_db(path=":memory:"):
     db = sqlite3.connect(path)
     db.row_factory = sqlite3.Row
     db.executescript(SCHEMA)
+    ensure_mailer_columns(db)
     return db
+
+
+def ensure_mailer_columns(db):
+    """Add the mailer bookkeeping columns to the games table if a DB
+    predates them (DESIGN §1.1/§5.3 threading state). Idempotent."""
+    cols = {r[1] for r in db.execute("PRAGMA table_info(games)")}
+    for col in ("thread_message_id", "thread_refs", "last_email_at"):
+        if col not in cols:
+            db.execute(f"ALTER TABLE games ADD COLUMN {col} TEXT")
+    db.commit()
