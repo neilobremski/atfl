@@ -84,6 +84,19 @@ CREATE TABLE assets (
     prompt TEXT,
     prompt_hash TEXT
 );
+-- DESIGN.md §6.3 dogfooding hook: one stats row per turn (no dashboard
+-- yet). mutations_count / GM latencies / secrecy result are recorded by
+-- run_turn; send_ms is filled by the mailer when the turn email leaves.
+CREATE TABLE turn_stats (
+    turn_id INTEGER PRIMARY KEY,
+    adjudicate_ms REAL,
+    narrative_ms REAL,
+    secrecy_pass INTEGER,   -- 1 pass, 0 fail (fail rows roll back with the turn)
+    mutations_count INTEGER,
+    send_ms REAL,           -- NULL until the mailer sends the turn email
+    email_sent_at TEXT,
+    recorded_at TEXT
+);
 """
 
 

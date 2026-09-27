@@ -22,6 +22,7 @@ Rules enforced here, not elsewhere:
 import base64
 import os
 import sqlite3
+import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
 from email import policy
@@ -220,10 +221,14 @@ def send_outcome(games_dir, gmail, outcome, inbound, game_address=GAME_ADDRESS):
         refs = _chain(state.get("thread_refs"), in_reply_to)
         raw = build_raw(game_address, to_addr, outcome.subject,
                         outcome.body, in_reply_to, refs or None)
+        t0 = time.perf_counter()
         sent = gmail.send(base64.urlsafe_b64encode(raw).decode())
+        send_ms = (time.perf_counter() - t0) * 1000.0
         rfc_id = _sent_rfc_id(sent)
         _record_send(games_dir, outcome.guid, rfc_id,
                      _chain(refs, in_reply_to, rfc_id))
+        _record_send_stats(games_dir, outcome.guid, outcome.turn_no,
+                           send_ms)
         return sent["id"]
 
     if outcome.action == "clarify":
@@ -234,6 +239,25 @@ def send_outcome(games_dir, gmail, outcome, inbound, game_address=GAME_ADDRESS):
         return gmail.send(base64.urlsafe_b64encode(raw).decode())["id"]
 
     return None
+
+
+def _record_send_stats(games_dir, guid, turn_no, send_ms):
+    """§6.3: fill the send side of the turn's stats row once the email
+    actually leaves. Only turn emails have stats rows; clarification and
+    nudge emails (no turn) are not part of the dogfooding set."""
+    db = _open_game_db(games_dir, guid)
+    try:
+        row = db.execute(
+            "SELECT id FROM turns WHERE game_guid=? AND turn_no=?",
+            (guid, turn_no)).fetchone()
+        if row is None:
+            return
+        db.execute(
+            "UPDATE turn_stats SET send_ms=?, email_sent_at=? WHERE turn_id=?",
+            (send_ms, _utcnow_iso(), row["id"]))
+        db.commit()
+    finally:
+        db.close()
 
 
 def log_attachments(games_dir, guid, inbound):

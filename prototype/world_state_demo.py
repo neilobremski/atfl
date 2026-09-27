@@ -54,9 +54,41 @@ def main():
                 ok = False
             print(f"  [{mark}] {name} — {note}")
 
+    print("\n=== §6.3 per-turn stats (dogfooding) ===")
+    for row in db.execute(
+            "SELECT turn_id, adjudicate_ms, narrative_ms, secrecy_pass,"
+            " mutations_count, send_ms, email_sent_at FROM turn_stats ORDER BY turn_id"):
+        print(f"  turn {row[0]}: adjudicate={row[1]:.2f}ms narrative={row[2]:.2f}ms "
+              f"secrecy={'pass' if row[3] else 'FAIL'} mutations={row[4]} "
+              f"send_ms={row[5]} sent_at={row[6]} (not wired — no game address yet)")
+
     g = dict(db.execute("SELECT * FROM games").fetchone())
     assert g["plot_concept"] == DEMO_PLOT_PICK, "plot pick not recorded"
     print(f"\nplot_concept={g['plot_concept']!r} · status={g['status']}")
+
+    print("\n=== death path (§2.5.7) ===")
+    # Death is checked after a turn completes: set hp to 0, run one last
+    # turn, and the game must end forever.
+    db.execute("UPDATE actors SET physical_state=? WHERE slug='player'",
+               ('{"hp": 0, "fatigue": 0, "hunger": 0}',))
+    db.commit()
+    r = run_turn(db, "I throw myself off the trail into the fog.", gm)
+    g = dict(db.execute("SELECT * FROM games").fetchone())
+    assert r.game_over and g["status"] == "dead" and g["ended_at"], \
+        f"death not recorded: status={g['status']}"
+    turns_before = db.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+    try:
+        run_turn(db, "one more message", gm)
+        raise AssertionError("run_turn ran on a dead game")
+    except TurnFailed:
+        pass
+    turns_after = db.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+    assert turns_before == turns_after, "dead game gained a turn"
+    nudge_ok = db.execute(
+        "SELECT COUNT(*) FROM mutations WHERE cause LIKE '%nudge%'").fetchone()[0]
+    print(f"  death recorded: status=dead, ended_at set; "
+          f"no further turns run ({turns_after} total)")
+
     print("OK — turn-loop skeleton green." if ok else "CHECK FAILED")
 
 

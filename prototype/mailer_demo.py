@@ -5,6 +5,7 @@ clarification (fresh thread) -> failed turn sends nothing ->
 attachment logged, never acted on -> standalone-nudge fallback after
 24h of silence. All green = the mailer contract holds.
 """
+import os
 import sqlite3
 import sys
 import tempfile
@@ -69,6 +70,24 @@ check("References chain carries the thread history",
       and str(m1["Message-ID"]) in (m2["References"] or ""))
 check("subject stays constant for threading",
       str(m2["Subject"]) == str(m1["Subject"]))
+
+# --- 2b. §6.3 turn stats: pipeline stats recorded by run_turn, send
+# latency filled in by the mailer once each turn email went out ---
+db = sqlite3.connect(os.path.join(games_dir, f"{guid}.db"))
+db.row_factory = sqlite3.Row
+stats = [dict(r) for r in db.execute("SELECT * FROM turn_stats ORDER BY turn_id")]
+check("turn_stats rows exist for both turns", len(stats) == 2)
+check("secrecy check recorded as pass", all(s["secrecy_pass"] == 1 for s in stats))
+check("mutations count matches the ledger",
+      all(s["mutations_count"] == db.execute(
+          "SELECT COUNT(*) FROM mutations WHERE turn_id=?",
+          (s["turn_id"],)).fetchone()[0] for s in stats))
+check("GM latencies recorded (adjudicate + narrative)",
+      all((s["adjudicate_ms"] or 0) >= 0 and (s["narrative_ms"] or 0) >= 0
+          for s in stats))
+check("send latency recorded after the turn emails went out",
+      all(s["send_ms"] is not None and s["email_sent_at"] for s in stats))
+db.close()
 
 # --- 3. unknown GUID: clarification on a FRESH thread ---
 n_before = len(fake.outbox)

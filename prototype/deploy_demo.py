@@ -80,6 +80,7 @@ with tempfile.TemporaryDirectory() as tmp:
     # --once exits 0 in fake mode (exercises the real main() path)
     sys.argv = ["poll", "--fake"]
     os.environ["ATFL_GAMES_DIR"] = games_dir
+    os.environ["ATFL_GAME_ADDRESS"] = "game@example.com"  # config.load reads real env
     rc = poll.main(["--fake"])
     check("poll.main(['--fake']) exits 0", rc == 0)
 

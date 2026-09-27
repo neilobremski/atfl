@@ -20,6 +20,7 @@ turn failed and sends nothing.
 """
 import json
 import re
+import time
 from datetime import datetime, timezone
 
 from .gm import PLOT_ROSTER
@@ -156,6 +157,21 @@ def apply_effect(db, turn_id, etype, slug, field, new_value, cause):
     _mutate(db, turn_id, etype, row["id"], field, old, new_value, cause)
 
 
+def record_turn_stats(db, turn_id, adjudicate_ms=None, narrative_ms=None,
+                      secrecy_pass=None):
+    """DESIGN.md §6.3: one dogfooding stats row per turn. mutations_count
+    is counted from the ledger; secrecy_pass is 1/0. Called inside the
+    turn's transaction — a rolled-back turn leaves no stats row, which is
+    correct (its outcome was discarded)."""
+    n_mut = db.execute("SELECT COUNT(*) FROM mutations WHERE turn_id=?",
+                       (turn_id,)).fetchone()[0]
+    db.execute(
+        "INSERT OR REPLACE INTO turn_stats (turn_id, adjudicate_ms,"
+        " narrative_ms, secrecy_pass, mutations_count, recorded_at)"
+        " VALUES (?,?,?,?,?,?)",
+        (turn_id, adjudicate_ms, narrative_ms, secrecy_pass, n_mut,
+         datetime.now(timezone.utc).isoformat()))
+    return n_mut
 class TurnResult:
     def __init__(self, turn_id, turn_no, game_clock_start, game_clock_end,
                  narrative, questions, denylist_checked, game_over):
@@ -206,7 +222,9 @@ def run_turn(db, player_input, gm, turn_len_min=60):
     catchup = build_catchup(db, g["guid"], turn_no, last_real or 0)
 
     # 2. yes/no mutations
+    t0 = time.perf_counter()
     questions = gm.adjudicate(player_input, filtered)
+    adjudicate_ms = (time.perf_counter() - t0) * 1000.0
     if not questions:
         raise TurnFailed("GM produced no adjudication output")
     db.execute("UPDATE turns SET mutation_questions=? WHERE id=?", (_j(questions), turn_id))
@@ -223,8 +241,17 @@ def run_turn(db, player_input, gm, turn_len_min=60):
                     apply_effect(db, turn_id, etype, slug, field, new, f"partial effect: {qd['q']}")
 
     # 3. narrative + secrecy check — must pass BEFORE anything is sent
+    t1 = time.perf_counter()
     narrative = gm.compose_narrative(player_input, questions, filtered, catchup)
-    secrecy_check(narrative, _denylist(db, g["guid"]))
+    narrative_ms = (time.perf_counter() - t1) * 1000.0
+    try:
+        secrecy_check(narrative, _denylist(db, g["guid"]))
+    except TurnFailed:
+        # record the fail so the stats ledger shows it; the row rides in
+        # the turn's transaction and is rolled back if the retry fails (§2.6)
+        record_turn_stats(db, turn_id, adjudicate_ms, narrative_ms, 0)
+        raise
+    record_turn_stats(db, turn_id, adjudicate_ms, narrative_ms, 1)
     db.execute("UPDATE turns SET narrative=? WHERE id=?", (narrative, turn_id))
 
     # 4+5. advance time + update touched rows
@@ -290,4 +317,14 @@ def verify_turn(db, turn_id):
     checks.append(("death handling",
                    (hp <= 0) == (g["status"] == "dead"),
                    f"hp={hp}, status={g['status']}"))
+    # §6.3 dogfooding stats row: recorded by run_turn, send stats by mailer
+    stats = db.execute("SELECT * FROM turn_stats WHERE turn_id=?",
+                       (turn_id,)).fetchone()
+    stats_ok = (stats is not None and stats["secrecy_pass"] == 1
+                and stats["mutations_count"] == len(muts))
+    checks.append(("turn stats row (§6.3)", stats_ok,
+                   f"mutations={stats['mutations_count'] if stats else '?'}, "
+                   f"adjudicate={stats['adjudicate_ms']:.1f}ms, "
+                   f"narrative={stats['narrative_ms']:.1f}ms"
+                   if stats else "no stats row"))
     return checks
