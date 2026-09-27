@@ -33,7 +33,8 @@ from email.utils import make_msgid
 
 _MSG = BytesParser(policy=policy.default)
 
-from .render import render_nudge
+from .render import (render_nudge, COMPOSITE_CID, COMPOSITE_IMG_MARKER,
+                     COMPOSITE_IMG_TAG)
 from . import schema as _schema
 
 GAME_ADDRESS = "abovethefogline@example.invalid"  # STUB until OQ#1 closes
@@ -101,12 +102,24 @@ def extract_text_body(raw_bytes):
 
 
 def build_raw(from_addr, to_addr, subject, body,
-              in_reply_to=None, references=None, attachments=None):
-    """RFC822 bytes for a text/plain send, with optional threading and
-    attachments. attachments: [(filename, data_bytes, mimetype)].
+              in_reply_to=None, references=None, attachments=None,
+              html_body=None):
+    """RFC822 bytes for a send, with optional threading and attachments.
 
     Sets an explicit Message-ID (Gmail preserves a supplied one): the
-    mailer threads on RFC Message-IDs, never on Gmail API ids."""
+    mailer threads on RFC Message-IDs, never on Gmail API ids.
+
+    html_body: when given, the message becomes multipart/alternative
+    (text/plain + text/html) — plain text always carries the complete
+    message; the HTML twin is the rich reading layer (Neil's 2026-09-27
+    directive: every game email goes out in rich HTML).
+
+    attachments: [(filename, data_bytes, mimetype[, content_id])] — a
+    4th element marks the part as INLINE (Content-ID header), so the
+    HTML can show it with <img src="cid:...">. Gmail renders inline
+    cid-referenced parts inside the body rather than as a download
+    row at the bottom (this is the "inline images" requirement from
+    Neil's 2026-09-27 input)."""
     m = EmailMessage()
     m["From"] = from_addr
     m["To"] = to_addr
@@ -117,12 +130,34 @@ def build_raw(from_addr, to_addr, subject, body,
     if references:
         m["References"] = references
     m.set_content(body)
-    for filename, data, mimetype in (attachments or []):
+    if html_body:
+        m.add_alternative(html_body, subtype="html")
+    for att in (attachments or []):
+        filename, data, mimetype = att[0], att[1], att[2]
+        cid = att[3] if len(att) > 3 else None
         maintype, _, subtype = mimetype.partition("/")
         m.add_attachment(data, maintype=maintype or "application",
                          subtype=subtype or "octet-stream",
                          filename=filename)
+        if cid:
+            part = m.get_payload()[-1]
+            del part["Content-Disposition"]
+            part.add_header("Content-Disposition", "inline",
+                            filename=filename)
+            part.add_header("Content-ID", f"<{cid}>")
     return m.as_bytes()
+
+
+def _html_for_send(html, attachments):
+    """Resolve the composite marker in a turn email's HTML twin: with
+    the composite attached -> inline <img cid:...>; without -> the
+    marker is dropped, never a broken image."""
+    if not html or COMPOSITE_IMG_MARKER not in html:
+        return html
+    cids = {a[3] for a in (attachments or []) if len(a) > 3 and a[3]}
+    if COMPOSITE_CID in cids:
+        return html.replace(COMPOSITE_IMG_MARKER, COMPOSITE_IMG_TAG)
+    return html.replace(COMPOSITE_IMG_MARKER, "")
 
 
 def _from_addr(value):
@@ -231,7 +266,9 @@ def send_outcome(games_dir, gmail, outcome, inbound, game_address=GAME_ADDRESS,
         refs = _chain(state.get("thread_refs"), in_reply_to)
         raw = build_raw(game_address, to_addr, outcome.subject,
                         outcome.body, in_reply_to, refs or None,
-                        attachments=attachments)
+                        attachments=attachments,
+                        html_body=_html_for_send(outcome.html,
+                                                 attachments))
         t0 = time.perf_counter()
         sent = gmail.send(base64.urlsafe_b64encode(raw).decode())
         send_ms = (time.perf_counter() - t0) * 1000.0
@@ -246,7 +283,7 @@ def send_outcome(games_dir, gmail, outcome, inbound, game_address=GAME_ADDRESS,
         # §5.3: clarification is always a fresh thread — no threading
         # headers, so a confused player never lands mid-game-thread.
         raw = build_raw(game_address, to_addr, outcome.subject,
-                        outcome.body)
+                        outcome.body, html_body=outcome.html)
         return gmail.send(base64.urlsafe_b64encode(raw).decode())["id"]
 
     return None
@@ -316,9 +353,10 @@ def maybe_nudge(games_dir, gmail, gm_unused=None, game_address=GAME_ADDRESS,
             continue  # §2.4.5: dead or ended games get no nudges, ever
         if row["last_email_at"] and row["last_email_at"] >= cutoff:
             continue
-        subject, body = render_nudge(guid)
+        subject, body, html = render_nudge(guid)
         raw = build_raw(game_address, row["player_email"], subject, body,
-                        row["thread_message_id"], row["thread_refs"] or None)
+                        row["thread_message_id"], row["thread_refs"] or None,
+                        html_body=html)
         sent_msg = gmail.send(base64.urlsafe_b64encode(raw).decode())
         rfc_id = _sent_rfc_id(sent_msg)
         _record_send(games_dir, guid, rfc_id,
@@ -367,7 +405,13 @@ def _store_seen(games_dir, message_ids):
 
 def _turn_attachments(games_dir, outcome, images_cfg):
     """Phase 3: build the turn's composite image for a turn_email
-    outcome. Returns ([(filename, jpeg, "image/jpeg")], note_or_None).
+    outcome. Returns ([(filename, jpeg, "image/jpeg", content_id)],
+    note_or_None).
+
+    The composite is marked INLINE via Content-ID so the turn email's
+    HTML twin renders it inside the body (Neil's 2026-09-27
+    inline-images requirement); HTML-less clients still see the plain
+    text plus the JPEG as a viewable part.
 
     Any failure → empty attachments and a note; the text-only turn
     still sends (§2.6: images never fail a turn). Only turn emails get
@@ -385,7 +429,7 @@ def _turn_attachments(games_dir, outcome, images_cfg):
         comp = build_turn_composite(games_dir, outcome.guid,
                                     outcome.turn_no, provider)
         return ([(f"turn-{outcome.turn_no}-composite.jpg", comp["jpeg"],
-                  "image/jpeg")],
+                  "image/jpeg", COMPOSITE_CID)],
                 f"composite attached ({comp['time_of_day']}, "
                 f"ref={'kept' if comp['character_ref_used'] else 'new'})")
     except Exception as e:

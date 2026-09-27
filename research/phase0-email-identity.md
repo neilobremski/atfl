@@ -58,3 +58,16 @@ Murph can prototype the turn loop against a throwaway address in the meantime.
   message id; reply by `messages.send` with threading headers preserved.
 - Alias shortcut (weak): sending as `eweplay9+fogline@gmail.com` works today
   but the identity is ugly and it still shares Neil's mailbox. Not preferred.
+
+## Update 2026-09-27 — Neil's directive (supersedes the Option A ask)
+
+New Google accounts are too hard to get now (Google's restrictions), so
+**no new account**: the game uses Neil's existing email capability for MVP
+testing — Murph's Gmail integration (the `hatch_gws_cli gmail` connection)
+sends/receives as the game while the adapter layer (`GmailClient`
+abstraction) keeps the mailbox swappable. Longer-term candidate: a
+dedicated **Inkbox with email capability** whose whole job is running the
+game. Any candidate service must be verified to support **inline images**
+and **HTML rich-text bodies** — both are now hard requirements (Neil:
+"that's going to be important"). Gmail is verified for both as of
+session #18 (cid-referenced inline parts, multipart/alternative).

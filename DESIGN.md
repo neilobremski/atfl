@@ -111,8 +111,9 @@ Player input extraction: `turns.player_input` is the email body minus the
 ### 2.3 Idle turns and the daily touch
 - An idle turn is a normal turn whose `player_input` reads "idle default";
   the GM drives the player's actor with a conservative default (§1.3).
-- The idle-turn email leads with the catch-up line and ends with an open
-  prompt — it *is* the day's "still your move" touch. No separate "are you
+- The idle-turn email leads with the catch-up line and ends with the
+  world blocks — the open prompt is gone (2026-09-27, Neil); the idle
+  turn *is* the day's "still your move" touch. No separate "are you
   there?" email while idle turns are running.
 - Standalone nudge (fallback only): fires if an active game went ≥24h of
   real time with **no turn email at all** (idle-turn pipeline down, or a
@@ -128,7 +129,11 @@ review checkpoint under §5):
    their last input. Format: `While you were quiet: <1–2 concrete events>.`
    Each event must be auditable against `mutations` rows since the player's
    last input turn.
-3. End with an open question or concrete choice ("What do you do?",
+3. (Superseded 2026-09-27 for turn emails: Neil removed the open
+   prompt — turns end without a question, and silence folds into the
+   next catch-up. Applies now only to standalone-nudge wording, and
+   the nudge prose is placeholder per §5 anyway.) Formerly: end with
+   an open question or concrete choice ("What do you do?",
    "Follow the trail or go back for the bottle?") — never a demand, never
    invented urgency the world state doesn't support.
 4. ≤120 words for a standalone nudge. No guilt-tripping, no manufactured
@@ -496,10 +501,16 @@ specified here — it is Neil's eye (review checkpoint: turn-1 intro draft,
 session #5, still open).
 
 ### 5.1 Body format
-- **text/plain only** for the MVP. No HTML: reliable across mail clients,
-  nothing to break, and the Phase 3 images attach as plain MIME image
-  attachments rather than inline HTML. One outbound email per turn (§2.5.4),
-  images included.
+- **multipart/alternative: text/plain + text/html** (Neil's 2026-09-27
+  directive, overriding the earlier text/plain-only rule). The plain
+  part always carries the complete message; the HTML twin is the rich
+  reading layer and must never add facts. One outbound email per turn
+  (§2.5.4), images included.
+- **2026-09-27 (Neil): no open prompt.** Turn emails no longer end with
+  a question ("What do you do?" is gone): the email ends after the
+  world blocks, and a silent player is folded into the next turn's
+  catch-up lead. Death/game-end still ends with the explicit closer
+  (§5.3).
 - Monospace blocks (indented or fenced) render fine in plain text clients;
   the map block (§5.4) assumes monospace.
 
@@ -532,9 +543,8 @@ Day {N} · {HH:MM} · {time-of-day word}            (canonical game-clock line,
 Carrying: <compact inventory line>                (e.g. "hands empty ·
                                                   backpack empty"; §3.2 slots)
 
-<open prompt — ends with a question>              (§2.4: always an open
-                                                 question, never a guessable
-                                                 menu)
+[no open prompt — removed 2026-09-27 (Neil): the email ends here for
+ alive games; death/game-end appends the closer line below]
 
 ---
 Game code: <GUID>                                 (§1.1 — footer, always last)
@@ -544,8 +554,8 @@ Turn {N} · Day {d}, {HH:MM}
   `prototype/turn_email_layout.txt`; the Python renderer in Phase 2 fills it
   verbatim. Example prose there is illustration only — not locked.
 - **What the renderer receives:** the *filtered* world state (§4.4 — no
-  `hidden_traits` key at all), the turn's narrative, the catch-up line, and
-  the prompt. It cannot leak what it never sees.
+  `hidden_traits` key at all), the turn's narrative, and the catch-up
+  line. It cannot leak what it never sees.
 - **Secrecy gate (§2.5.5):** after rendering, substring-check the body against
   every value in the game's `hidden_traits` JSON (denylist); a hit fails the
   turn — the email is NOT sent (§2.6: retry once, then surface in the digest).
@@ -744,10 +754,12 @@ review. The build passes when every box holds.
   lean: "the fog is wrong itself" (earth changing) — closest to Neil's
   Silent Hill ocean-of-fog origin. Hidden stats gate step-2 yes/no
   claims; hidden changes go through the same mutation ledger.
-- Renderer (text-first MVP): text/plain body, fixed §5.2 block order
-  (clock line → catch-up lead → narrative → map block → inventory line →
-  open prompt → GUID footer); the text email always carries the complete
-  turn, Phase 3 images are additive attachments. System emails
+- Renderer (multipart/alternative since 2026-09-27: text/plain body +
+  rich-HTML twin, per Neil): fixed §5.2 block order
+  (clock line → catch-up lead → narrative → composite slot → map block →
+  inventory line → GUID footer; no open prompt since 2026-09-27); the text
+  email always carries the complete turn, Phase 3 images render inline in
+  the HTML and as viewable parts. System emails
   (nudge/clarification/death) are never in-character. Text map block
   doubles as the Phase 3 image fallback and the audit surface.
 - MVP "done" = acceptance checklist (start → turn flow → GUID threading

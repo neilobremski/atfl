@@ -62,15 +62,19 @@ def get_lock(guid):
 
 class DispatchOutcome:
     """One inbound message's resolution. action is one of:
-      turn_email — a turn ran; send subject/body as the game's turn email
+      turn_email — a turn ran; send subject/body[/html] as the game's turn email
       clarify    — no turn ran; send the fresh-thread clarification email
       failed     — the turn failed twice; send NOTHING (§2.6)
-      ignored    — message was a duplicate/empty; send nothing"""
+      ignored    — message was a duplicate/empty; send nothing
+
+    html is the rich-HTML twin of body (2026-09-27: Neil wants HTML on
+    every game email; plain text always carries the complete message)."""
     def __init__(self, action, sender, subject=None, body=None,
-                 guid=None, turn_no=None, note=None):
+                 guid=None, turn_no=None, note=None, html=None):
         self.action, self.sender = action, sender
         self.subject, self.body = subject, body
         self.guid, self.turn_no, self.note = guid, turn_no, note
+        self.html = html
 
 
 def extract_guid(text):
@@ -156,9 +160,9 @@ def _turn_outcome(db, sender, gm, player_input, guid, turn_len_min, late_for=Non
                  folded, f"late reply to turn {late_for['turn_no']}"))
         db.commit()
     view = filtered_view(db, guid)
-    subject, body = render_turn_email(guid, view, result)
+    subject, body, html = render_turn_email(guid, view, result)
     return DispatchOutcome("turn_email", sender, subject, body,
-                           guid=guid, turn_no=result.turn_no,
+                           guid=guid, turn_no=result.turn_no, html=html,
                            note=f"late reply folded for {len(late_for['inputs'])} message(s)"
                            if late_for else None)
 
@@ -187,9 +191,9 @@ def dispatch_message(games_dir, sender_email, subject, body, gm, turn_len_min=60
     if kind == "signup":
         return new_game(games_dir, sender_email, body, gm, turn_len_min)
     if kind == "clarify":
-        csubj, cbody = render_clarification(reason)
+        csubj, cbody, chtml = render_clarification(reason)
         return DispatchOutcome("clarify", sender_email, csubj, cbody,
-                               note=f"ambiguous inbound: {reason}")
+                               note=f"ambiguous inbound: {reason}", html=chtml)
     db = _open_db(games_dir, matched_guid)
     try:
         with get_lock(matched_guid):

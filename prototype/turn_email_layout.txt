@@ -1,19 +1,27 @@
-# Above the Fog Line — turn email layout template (text/plain)
+# Above the Fog Line — turn email layout template (multipart/alternative)
 # Companion to DESIGN.md §5 (renderer spec). The Phase 2 renderer fills this
 # template verbatim. {placeholders} are substituted per turn; everything else
-# is literal. Example prose in the filled example is ILLUSTRATION ONLY — the
-# turn-1 draft is still waiting on Neil's eye (session #5 checkpoint).
+# is literal. Every outbound email carries a text/plain body (the complete
+# message) plus a rich-HTML twin (the readable layer; Neil's 2026-09-27
+# directive). The HTML adds no facts. Example prose in the filled example is
+# ILLUSTRATION ONLY — the turn-1 draft is still waiting on Neil's eye
+# (session #5 checkpoint); he liked the 2026-09-27 draft minus the prompt.
 
 === TEMPLATE ================================================================
 
 Subject: [ATFL {guid8}] Above the Fog Line
 In-Reply-To: {prev_message_id}          # game start: absent (starts the thread)
 References: {message_id_chain}          # game start: absent
+Content-Type: multipart/alternative     # text/plain + text/html twins
 
 Day {day_n} · {clock_hh_mm} · {time_of_day}
 {catch_up_lead}                          # mandatory from turn 2; omitted on turn 1
 
 {narrative}                              # GM prose, target ≤400 words
+
+[[TURN_COMPOSITE]]                       # mailer swaps in <img cid:…> when the
+                                         # Phase 3 composite attaches; dropped
+                                         # when no image (never a broken img)
 
 --- Known places ---
 {map_block}                              # discovered places in full; visible-but-
@@ -22,8 +30,9 @@ Day {day_n} · {clock_hh_mm} · {time_of_day}
 
 Carrying: {inventory_line}
 
-{open_prompt}                            # ends with a question; death/game-end
-                                         # replaces this with the closer line
+                                         # 2026-09-27: no open prompt. The email
+                                         # ends with the world; a silent player
+                                         # is folded into the next catch-up.
 
 ---
 Game code: {guid}
@@ -57,8 +66,6 @@ trail-down — not yet explored
 fog-below — visible below, not yet visited
 
 Carrying: hands empty · backpack empty
-
-What do you do?
 
 ---
 Game code: 3f2a9c11-7b4d-4f2e-9a1c-5d6e7f8a9b0c

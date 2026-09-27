@@ -148,18 +148,32 @@ stitched = stitch_composite(Image.open(io.BytesIO(a1)), map_img,
 check("stitch yields a valid JPEG of the stacked size",
       Image.open(io.BytesIO(stitched)).size == (256, 256 * 3 + 12))
 
-# --- 7. outbound attachment path: build_raw with attachments ---
+# --- 7. outbound attachment path: build_raw with inline composite ---
 raw = build_raw("game@example.com", PLAYER, "subject", "body",
+                html_body="<p>body</p><img src=\"cid:turn-composite\">",
                 attachments=[("turn-1-composite.jpg", comp1["jpeg"],
-                              "image/jpeg")])
+                              "image/jpeg", "turn-composite")])
 parsed = BytesParser(policy=policy.default).parsebytes(raw)
 atts = list(parsed.iter_attachments())
 check("one image/jpeg attachment rides along",
       len(atts) == 1 and atts[0].get_content_type() == "image/jpeg")
 check("attachment filename set",
       atts[0].get_filename() == "turn-1-composite.jpg")
+check("composite marked inline with a Content-ID (Neil's inline-images req)",
+      atts[0]["Content-ID"] == "<turn-composite>"
+      and atts[0].get_content_disposition() == "inline")
 check("body text still intact", parsed.get_body(preferencelist=("plain",))
       .get_content().strip() == "body")
+check("HTML twin rides along with the cid reference",
+      parsed.get_body(preferencelist=("html",)).get_content())
+# 3-tuple attachments (no cid) stay plain downloadable attachments
+raw2 = build_raw("game@example.com", PLAYER, "subject", "body",
+                 attachments=[("notes.txt", b"hi", "text/plain")])
+att2 = list(BytesParser(policy=policy.default).parsebytes(raw2)
+            .iter_attachments())[0]
+check("no-cid attachment has no Content-ID",
+      att2["Content-ID"] is None
+      and att2.get_content_disposition() == "attachment")
 
 # --- 8. end to end: poll cycle with stub images attaches the composite ---
 fake = FakeGmail()
@@ -178,6 +192,13 @@ check("outbound turn email carries the composite JPEG",
       len(sent_atts) == 1
       and sent_atts[0].get_content_type() == "image/jpeg"
       and sent_atts[0].get_filename().endswith("-composite.jpg"))
+check("composite part is inline via Content-ID",
+      sent_atts[0]["Content-ID"] == "<turn-composite>"
+      and sent_atts[0].get_content_disposition() == "inline")
+sent_html = sent.get_body(preferencelist=("html",)).get_content()
+check("HTML twin renders the composite inline (cid reference)",
+      'src="cid:turn-composite"' in sent_html
+      and "TURN_COMPOSITE" not in sent_html)
 body = sent.get_body(preferencelist=("plain",)).get_content()
 check("turn body still complete text with image on",
       "Game code:" in body and len(body) > 100)

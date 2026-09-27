@@ -38,6 +38,16 @@ def last_sent():
     return fake.outbox[-1]["parsed"]
 
 
+def plain(msg):
+    """The text/plain part (always the complete message)."""
+    return msg.get_body(preferencelist=("plain",)).get_content()
+
+
+def html(msg):
+    """The text/html twin (rich reading layer)."""
+    return msg.get_body(preferencelist=("html",)).get_content()
+
+
 # --- 1. signup: first email starts a game; turn 1 threads to it ---
 fake = FakeGmail()
 fake.queue_inbound(PLAYER, "start", "start",
@@ -50,9 +60,19 @@ check("turn 1 threads to the signup email",
       m1["In-Reply-To"] == "<signup-1@fake>")
 check("turn 1 subject carries the tag",
       str(m1["Subject"]).startswith("[ATFL "))
-body1 = m1.get_content()
+body1 = plain(m1)
 guid = [l for l in body1.splitlines() if l.startswith("Game code:")][0].split(": ")[1]
 check("turn 1 body has the Game code footer", len(guid) == 36)
+check("turn 1 has a rich-HTML twin (Neil's 2026-09-27 directive)",
+      html(m1) is not None and "<html" in html(m1))
+check("HTML twin carries the same facts (narrative + Game code)",
+      "Known places" in html(m1) and guid in html(m1))
+check("2026-09-27: the open prompt is gone from the plain body",
+      "What do you do?" not in body1)
+check("2026-09-27: the open prompt is gone from the HTML twin",
+      "What do you do?" not in html(m1))
+check("no leftover composite marker in the HTML (no image attached)",
+      "TURN_COMPOSITE" not in html(m1))
 check("signup marked read", fake.inbox[0]["id"] in fake.read_ids)
 guid8 = guid.replace("-", "")[:8]
 
@@ -100,6 +120,8 @@ mc = last_sent()
 check("clarification starts a fresh thread (no In-Reply-To)",
       mc["In-Reply-To"] is None and mc["References"] is None)
 check("clarification subject", str(mc["Subject"]) == "[ATFL] Couldn't match your game")
+check("clarification has an HTML twin too",
+      html(mc) is not None and "match it to a game" in html(mc))
 check("only the clarification was added", len(fake.outbox) == n_before + 1)
 
 # --- 4. failed turn: nothing leaves (§2.6) ---
@@ -149,7 +171,9 @@ mn = last_sent()
 check("nudge is a thread reply, not a fresh thread",
       mn["In-Reply-To"] is not None)
 check("nudge is short (<=120 words per §2.4)",
-      len(mn.get_content().split()) <= 120)
+      len(plain(mn).split()) <= 120)
+check("nudge has an HTML twin", html(mn) is not None
+      and "your game is waiting" in html(mn))
 turns_after = sqlite3.connect(f"{games_dir}/{guid}.db").execute(
     "SELECT COUNT(*) FROM turns").fetchone()[0]
 check("nudge mutated nothing (turn count unchanged)",

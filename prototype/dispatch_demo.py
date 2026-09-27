@@ -47,6 +47,8 @@ assert o.action == "turn_email" and o.turn_no == 1
 guid = o.guid
 assert "While you were quiet" not in o.body  # no catch-up on turn 1
 assert o.body.strip().endswith(f"Turn 1 · Day 1, 07:00")
+assert "What do you do?" not in o.body  # Neil's 2026-09-27 directive
+assert o.html and "<html" in o.html and "What do you do?" not in o.html
 
 print("\n== 2. GUID+sender reply -> turn 2 ==")
 o = show(dispatch_message(GAMES, "neil@example.com", f"Re: [ATFL {guid[:8]}]",
