@@ -1,0 +1,6 @@
+# Runtime deps for the Phase 2 MVP on free-micro-1.
+# Only needed for the real Gmail adapter (googleapiclient). Everything
+# else — turn loop, dispatch, mailer, FakeGmail demos — is stdlib-only.
+google-api-python-client>=2.100
+google-auth-httplib2>=0.1
+google-auth-oauthlib>=1.0

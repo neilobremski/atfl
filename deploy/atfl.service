@@ -1,0 +1,30 @@
+# Above the Fog Line game server — runs on free-micro-1 (Oracle Always Free)
+[Unit]
+Description=Above the Fog Line game server (email turn poll loop)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=atfl
+Group=atfl
+WorkingDirectory=/srv/atfl/atfl
+EnvironmentFile=/etc/atfl/atfl.env
+ExecStart=/srv/atfl/venv/bin/python -m server.poll
+Restart=always
+RestartSec=30
+# Per-cycle crashes are already swallowed by the poll loop (it logs and
+# continues); Restart=always covers the process itself dying (OOM, host
+# reboot, VM replacement). The games dir holds everything durable —
+# game SQLite files and mailer.db travel with the checkout, nothing
+# lives in /tmp.
+
+# Hardening: read-only system, only the games dir writable.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/atfl
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
