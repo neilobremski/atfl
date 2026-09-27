@@ -394,9 +394,21 @@ def _store_asset(games_dir, guid, turn_no, kind, data, prompt):
 
 PANEL_ORDER = ("scene", "map", "selfie")  # DESIGN §5.2 block order
 
+# Composite tuning, decided 2026-09-27 (research/composite-size-matrix.md):
+# 1024px panels keep the archived turn composite crisp; email clients
+# downscale to ~600px anyway, so the archive copy is the real beneficiary.
+# JPEG quality 80 is visually indistinguishable from 85 at these sizes on
+# photographic panels and ~7% smaller; the map panel's line-art text stays
+# legible at q80 in 1024px. Typical outbound composite lands ~100-150KB
+# on stub/synthetic panels, ~0.3-0.8MB on real AI-generated photos —
+# comfortably inside Gmail's 25MB cap.
+COMPOSITE_PANEL_SIZE = 1024
+COMPOSITE_JPEG_QUALITY = 80
+
 
 def stitch_composite(scene: Image.Image, map_panel: Image.Image,
-                     selfie: Image.Image, size: int = 1024) -> bytes:
+                     selfie: Image.Image, size: int = COMPOSITE_PANEL_SIZE,
+                     quality: int = COMPOSITE_JPEG_QUALITY) -> bytes:
     """Stack the three panels vertically into one JPEG: scene, map,
     selfie — the turn email's image-led order (§5.2). Thin dark bands
     separate the panels."""
@@ -410,12 +422,13 @@ def stitch_composite(scene: Image.Image, map_panel: Image.Image,
         canvas.paste(panel, (0, y))
         y += size + band
     buf = io.BytesIO()
-    canvas.save(buf, "JPEG", quality=85)
+    canvas.save(buf, "JPEG", quality=quality)
     return buf.getvalue()
 
 
 def build_turn_composite(games_dir, guid, turn_no, provider,
-                         size: int = 1024) -> dict:
+                         size: int = COMPOSITE_PANEL_SIZE,
+                         quality: int = COMPOSITE_JPEG_QUALITY) -> dict:
     """Generate the turn's three-panel composite.
 
     Steps: prompt from filtered state (+ game-clock time of day) ->
@@ -466,7 +479,7 @@ def build_turn_composite(games_dir, guid, turn_no, provider,
             Image.open(io.BytesIO(scene_jpg)),
             map_img,
             Image.open(io.BytesIO(selfie_jpg)),
-            size=size)
+            size=size, quality=quality)
     except Exception as e:
         raise ImageError(f"composite stitch failed: {e}") from e
 

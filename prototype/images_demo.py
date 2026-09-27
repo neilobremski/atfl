@@ -148,6 +148,26 @@ stitched = stitch_composite(Image.open(io.BytesIO(a1)), map_img,
 check("stitch yields a valid JPEG of the stacked size",
       Image.open(io.BytesIO(stitched)).size == (256, 256 * 3 + 12))
 
+# --- 6a. composite size/quality tuning constants (2026-09-27 decision) ---
+from server.images import (COMPOSITE_PANEL_SIZE, COMPOSITE_JPEG_QUALITY,
+                           build_turn_composite)
+check("production composite is 1024px panels (archive-crisp; clients downscale)",
+      COMPOSITE_PANEL_SIZE == 1024)
+check("production composite JPEG quality is 80 (sweet spot vs 85)",
+      COMPOSITE_JPEG_QUALITY == 80)
+hi_q = stitch_composite(Image.open(io.BytesIO(a1)), map_img,
+                        Image.open(io.BytesIO(b1)), size=256, quality=95)
+lo_q = stitch_composite(Image.open(io.BytesIO(a1)), map_img,
+                        Image.open(io.BytesIO(b1)), size=256, quality=60)
+check("quality param flows through: lower quality -> fewer bytes",
+      len(lo_q) < len(hi_q))
+def_q = stitch_composite(Image.open(io.BytesIO(a1)), map_img,
+                         Image.open(io.BytesIO(b1)), size=256)
+check("default quality matches the constant",
+      len(def_q) == len(stitch_composite(Image.open(io.BytesIO(a1)), map_img,
+                                         Image.open(io.BytesIO(b1)), size=256,
+                                         quality=COMPOSITE_JPEG_QUALITY)))
+
 # --- 7. outbound attachment path: build_raw with inline composite ---
 raw = build_raw("game@example.com", PLAYER, "subject", "body",
                 html_body="<p>body</p><img src=\"cid:turn-composite\">",
