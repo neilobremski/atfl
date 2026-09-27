@@ -8,9 +8,12 @@ image generation never fails the turn — text sends anyway.
 Mirrors the Phase 2 stub-then-real pattern:
   - `StubImageProvider` — deterministic placeholder panels, offline dev
     and tests; no key, no network.
+  - `GeminiImageProvider` — Gemini generateContent REST adapter, stdlib
+    only (urllib), AI Studio key in the `x-goog-api-key` header (never
+    in the URL, so it can't leak through logs/proxies), one retry on
+    transport/5xx, reference-image support for the selfie.
   - `build_provider(mode, api_key)` — mode "real" raises until the key
-    exists (loud refusal, same as config.py's ATFL_GAME_ADDRESS rule);
-    the Gemini REST implementation lands when OQ#6 closes.
+    exists (loud refusal, same as config.py's ATFL_GAME_ADDRESS rule).
 
 Secrecy shape: prompt builders take ONLY the filtered world view
 (turn_loop.filtered_view — physical state, never hidden_traits, never
@@ -25,6 +28,10 @@ import json
 import logging
 import os
 import sqlite3
+import base64
+import socket
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -182,11 +189,164 @@ def build_provider(mode: str, api_key: str | None = None) -> ImageProvider:
             raise ImageError(
                 "ATFL_IMAGES=real needs the image API key provisioned "
                 "(open question #6); refusing to run without it.")
-        raise ImageError(
-            "real provider not wired yet — the key exists but the Gemini "
-            "REST adapter lands in the next session; stub mode keeps dev "
-            "moving.")
+        return GeminiImageProvider(api_key)
     raise ImageError(f"ATFL_IMAGES must be 'off', 'stub' or 'real', got {mode!r}")
+
+
+# -- Gemini REST provider --------------------------------------------------------
+
+# Model ID pinned at the research decision (phase3-image-pipeline.md).
+# These IDs die fast in this space (gemini-2.5-flash-image shut down
+# 2026-10-02); revisit per release — and note the turn loop pins no
+# model behavior in any demo, so a swap is a config-layer change.
+GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"
+GEMINI_ENDPOINT = ("https://generativelanguage.googleapis.com/v1beta/"
+                   "models/{model}:generateContent")
+
+
+def _text_part(text):
+    return {"text": text}
+
+
+def _inline_part(mime_type, data_bytes):
+    return {"inlineData": {"mimeType": mime_type,
+                           "data": base64.b64encode(data_bytes).decode()}}
+
+
+def _first_inline_data(response_json):
+    """Pull the first returned image part from a generateContent
+    response. Returns base64 string or None."""
+    for cand in response_json.get("candidates", []):
+        for part in cand.get("content", {}).get("parts", []):
+            inline = part.get("inlineData") or part.get("inline_data")
+            if inline and inline.get("data"):
+                return inline["data"]
+    return None
+
+
+def _to_jpeg(raw_bytes):
+    """Provider may return PNG — normalize to JPEG bytes so the archive
+    and the character-ref store have one format."""
+    img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=90)
+    return buf.getvalue()
+
+
+class GeminiImageProvider:
+    """Real backend: Gemini generateContent image generation.
+
+    - stdlib-only (urllib) — no new deploy dependency; deploy on
+      free-micro-1 keeps requirements.txt as-is.
+    - The AI Studio key travels in the `x-goog-api-key` header, never in
+      the URL, so it can't leak through access logs or the sandbox
+      proxy's request line.
+    - Timeout 60s + one retry on transport failures and 5xx (one spare
+      beat, not a loop — a dead provider must degrade to text-only,
+      not hang the poll cycle). 429 is NOT retried: images never fail
+      a turn, so rate-limiting degrades to text-only immediately.
+    - `character_ref` (the stored first selfie JPEG) is sent as a
+      reference image with a continuity instruction for generate_selfie.
+    - `request_fn(url, headers, body_bytes) -> (status, body_bytes)`
+      is injectable so the demo pins the REST contract without network.
+    """
+
+    def __init__(self, api_key, *, model=GEMINI_IMAGE_MODEL,
+                 timeout=60, request_fn=None):
+        if not api_key:
+            raise ImageError(
+                "GeminiImageProvider needs an API key (open question #6); "
+                "refusing to construct without one.")
+        self._api_key = api_key
+        self._model = model
+        self._timeout = timeout
+        self._request_fn = request_fn or self._urllib_post
+
+    # -- ImageProvider protocol --
+
+    def generate_scene(self, prompt: str, *, size: int = 1024) -> bytes:
+        return self._generate([_text_part(prompt)], size=size)
+
+    def generate_selfie(self, prompt: str, *, character_ref: bytes,
+                        size: int = 1024) -> bytes:
+        parts = []
+        if character_ref:
+            parts.append(_inline_part("image/jpeg", character_ref))
+            prompt = ("Keep the SAME person as in the reference photo "
+                      "(same face, same hiker, same look); "
+                      + prompt)
+        parts.append(_text_part(prompt))
+        return self._generate(parts, size=size)
+
+    # -- REST plumbing --
+
+    @staticmethod
+    def _image_size_for(panel_px: int) -> str:
+        """1K covers our 1024 panels; anything larger goes 2K."""
+        return "2K" if panel_px > 1024 else "1K"
+
+    def _request_body(self, parts, *, size: int) -> bytes:
+        return json.dumps({
+            "contents": [{"parts": parts}],
+            "generationConfig": {
+                "responseModalities": ["IMAGE"],
+                "imageConfig": {"aspectRatio": "1:1",
+                                "imageSize": self._image_size_for(size)},
+            },
+        }).encode()
+
+    def _urllib_post(self, url, headers, body):
+        req = urllib.request.Request(url, data=body, headers=headers,
+                                     method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
+
+    def _generate(self, parts, *, size: int) -> bytes:
+        url = GEMINI_ENDPOINT.format(model=self._model)
+        headers = {"Content-Type": "application/json",
+                   "x-goog-api-key": self._api_key}
+        body = self._request_body(parts, size=size)
+
+        last = None
+        for attempt in (1, 2):
+            try:
+                status, raw = self._request_fn(url, headers, body)
+            except (urllib.error.URLError, socket.timeout, TimeoutError,
+                    OSError) as e:
+                last = ImageError(
+                    f"gemini transport failed (attempt {attempt}/2): {e}")
+                continue  # one retry on transport failure
+            if status == 429:
+                # Quota/rate limit: do NOT retry — degrade to text-only
+                # immediately (failure policy, images.py docstring).
+                raise ImageError(
+                    "gemini rate-limited (429); no retry this turn — "
+                    "text-only turn goes out.")
+            if 500 <= status < 600:
+                last = ImageError(
+                    f"gemini server error {status} (attempt {attempt}/2)")
+                continue  # one retry on 5xx
+            if status != 200:
+                raise ImageError(
+                    f"gemini rejected the request ({status}): "
+                    f"{raw[:200]!r}")
+            try:
+                b64 = _first_inline_data(json.loads(raw))
+            except (ValueError, KeyError, TypeError) as e:
+                raise ImageError(
+                    f"gemini response unparseable: {e}") from e
+            if not b64:
+                raise ImageError(
+                    "gemini returned no image part in this response")
+            try:
+                return _to_jpeg(base64.b64decode(b64))
+            except Exception as e:
+                raise ImageError(
+                    f"gemini image payload not decodable: {e}") from e
+        raise last
 
 
 # -- character reference store ----------------------------------------------

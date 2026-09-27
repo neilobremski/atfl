@@ -6,6 +6,7 @@ attachment path, and the failure policy: images never fail a turn.
 All green = the image pipeline contract holds.
 """
 import io
+import json
 import os
 import sqlite3
 import sys
@@ -19,7 +20,7 @@ from PIL import Image
 
 from server import config as _config
 from server.gm import MockGM
-from server.images import (ImageError, StubImageProvider, build_provider,
+from server.images import (ImageError, GeminiImageProvider, StubImageProvider, build_provider,
                            build_turn_composite, get_character_ref,
                            scene_prompt, selfie_prompt, stitch_composite,
                            time_of_day_word)
@@ -61,10 +62,15 @@ for bad in ("real", "bogus"):
     except ImageError:
         check(f"mode {bad!r} raises (no key / unknown)", True)
 try:
-    build_provider("real", api_key="k")
-    check("real+key raises (not wired yet)", False)
-except ImageError as e:
-    check("real+key raises (not wired yet)", "next session" in str(e))
+    real_provider = build_provider("real", api_key="k")
+    check("real+key -> GeminiImageProvider", isinstance(real_provider, GeminiImageProvider))
+except ImageError:
+    check("real+key -> GeminiImageProvider (wired)", False)
+try:
+    GeminiImageProvider("")
+    check("empty API key raises at construction", False)
+except ImageError:
+    check("empty API key raises at construction", True)
 
 # --- 3. stub determinism ---
 stub = StubImageProvider()
@@ -233,5 +239,127 @@ except _config.ConfigError:
     check("real without key raises", True)
 cfg = _config.load({"ATFL_GAME_ADDRESS": "x@y.z", "ATFL_IMAGES": "stub"})
 check("stub config passes", cfg["images_mode"] == "stub")
+
+# --- 12. real provider REST contract: hermetic, no network ---
+import base64 as _b64
+import urllib.error as _uerr
+
+def _fake_png(size=256):
+    buf = io.BytesIO()
+    Image.new("RGB", (size, size), (120, 90, 60)).save(buf, "PNG")
+    return buf.getvalue()
+
+_FAKE_PNG = _fake_png()
+
+def _fake_generate_response():
+    return json.dumps({
+        "candidates": [{
+            "content": {"parts": [
+                {"inlineData": {"mimeType": "image/png",
+                                "data": _b64.b64encode(_FAKE_PNG).decode()}}]}}]
+    }).encode()
+
+def _ok_transport(seen):
+    def _fn(url, headers, body):
+        seen.append((url, dict(headers), body))
+        return 200, _fake_generate_response()
+    return _fn
+
+seen = []
+gp = GeminiImageProvider("TEST-KEY", request_fn=_ok_transport(seen))
+scene = gp.generate_scene("mist on the ridge", size=1024)
+check("real provider returns image bytes", len(scene) > 1000)
+check("real provider normalizes to JPEG", scene[:2] == b"\xff\xd8")
+img = Image.open(io.BytesIO(scene))
+check("real provider JPEG opens", img.size[0] > 0)
+
+url, headers, body = seen[0]
+check("request hits generateContent endpoint",
+      url.endswith("gemini-3.1-flash-image:generateContent"))
+check("API key in header, not URL",
+      headers.get("x-goog-api-key") == "TEST-KEY" and "key=" not in url)
+payload = json.loads(body)
+check("generationConfig requests IMAGE only",
+      payload["generationConfig"]["responseModalities"] == ["IMAGE"])
+check("1K imageSize for 1024 panels",
+      payload["generationConfig"]["imageConfig"] == {"aspectRatio": "1:1",
+                                                     "imageSize": "1K"})
+check("scene parts are text-only",
+      [p.keys() for p in payload["contents"][0]["parts"]] == [{"text"}])
+check("prompt passes through verbatim",
+      payload["contents"][0]["parts"][0]["text"] == "mist on the ridge")
+
+seen2 = []
+gp2 = GeminiImageProvider("TEST-KEY", request_fn=_ok_transport(seen2))
+ref = _fake_png(128)
+selfie = gp2.generate_selfie("damp hiker selfie", character_ref=ref, size=1024)
+sparts = json.loads(seen2[0][2])["contents"][0]["parts"]
+check("selfie parts: ref image first, text second",
+      set(sparts[0]["inlineData"].keys()) == {"mimeType", "data"}
+      and "text" in sparts[1])
+check("ref sent as base64 inlineData",
+      _b64.b64decode(sparts[0]["inlineData"]["data"]) == ref)
+check("continuity instruction prepended",
+      sparts[1]["text"].startswith("Keep the SAME person as in the reference photo"))
+
+seen3 = []
+gp3 = GeminiImageProvider("TEST-KEY", request_fn=_ok_transport(seen3))
+gp3.generate_selfie("no ref available", character_ref=b"", size=1024)
+sparts3 = json.loads(seen3[0][2])["contents"][0]["parts"]
+check("no ref: text-only parts", [p.keys() for p in sparts3] == [{"text"}])
+
+calls = {"n": 0}
+def _flaky_then_ok(url, headers, body):
+    calls["n"] += 1
+    if calls["n"] == 1:
+        raise _uerr.URLError("connection reset")
+    return 200, _fake_generate_response()
+gp4 = GeminiImageProvider("TEST-KEY", request_fn=_flaky_then_ok)
+check("one transport retry then success", len(gp4.generate_scene("x")) > 1000
+      and calls["n"] == 2)
+
+def _always_fail(url, headers, body):
+    raise _uerr.URLError("down")
+try:
+    GeminiImageProvider("TEST-KEY", request_fn=_always_fail).generate_scene("x")
+    check("double transport failure raises ImageError", False)
+except ImageError:
+    check("double transport failure raises ImageError", True)
+
+def _limited(url, headers, body):
+    return 429, b'{"error": {"message": "quota"}}'
+try:
+    GeminiImageProvider("TEST-KEY", request_fn=_limited).generate_scene("x")
+    check("429 raises without retry", False)
+except ImageError as e:
+    check("429 raises without retry", "429" in str(e))
+
+def _badkey(url, headers, body):
+    return 400, b'{"error": {"message": "API key not valid"}}'
+try:
+    GeminiImageProvider("TEST-KEY", request_fn=_badkey).generate_scene("x")
+    check("400 surfaces the status", False)
+except ImageError as e:
+    check("400 surfaces the status", "400" in str(e))
+
+def _server_err(url, headers, body):
+    return 503, b'{"error": {"message": "backend"}}'
+calls5 = {"n": 0}
+def _count_server_err(url, headers, body):
+    calls5["n"] += 1
+    return _server_err(url, headers, body)
+try:
+    GeminiImageProvider("TEST-KEY", request_fn=_count_server_err).generate_scene("x")
+    check("5xx retries once then raises", False)
+except ImageError:
+    check("5xx retries once then raises", calls5["n"] == 2)
+
+def _no_image(url, headers, body):
+    return 200, b'{"candidates": [{"content": {"parts": [{"text": "no image for you"}]}}]}'
+try:
+    GeminiImageProvider("TEST-KEY", request_fn=_no_image).generate_scene("x")
+    check("response without image part raises", False)
+except ImageError:
+    check("response without image part raises", True)
 
 print("\nimages demo: all green")
