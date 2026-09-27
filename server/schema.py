@@ -16,7 +16,7 @@ CREATE TABLE games (
     game_clock_min INTEGER NOT NULL DEFAULT 0,
     started_at TEXT, ended_at TEXT,
     -- mailer bookkeeping (DESIGN §1.1/§5.3): one Gmail thread per game
-    thread_message_id TEXT,  -- Gmail id of our last outbound email
+    thread_message_id TEXT,  -- RFC Message-ID of our last outbound email (the In-Reply-To key)
     thread_refs TEXT,        -- References chain for the next reply
     last_email_at TEXT       -- when we last sent anything for this game
 );

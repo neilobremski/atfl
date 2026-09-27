@@ -2,8 +2,8 @@
 
 Maps dispatch outcomes to Gmail sends and polls the game mailbox. Built
 against an abstract GmailClient (the game's real address is still open
-question #1, so no live mailbox is touched here); a real adapter and a
-FakeGmail (tests) both implement it.
+question #1, so no live mailbox is touched here); the real API adapter
+lives in server/gmail_adapter.py and FakeGmail (tests) both implement it.
 
 Threading (§1.1, §5.3): every game's turn/nudge/death emails form one
 Gmail thread. The mailer keeps per-game threading state in the games
@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
+from email.utils import make_msgid
 
 _MSG = BytesParser(policy=policy.default)
 
@@ -49,12 +50,15 @@ class GmailClient(ABC):
     @abstractmethod
     def get(self, message_id):
         """-> normalized dict: id, thread_id, header_message_id, from,
-        to, subject, date, body (plain text), attachments
-        ([{filename, size_bytes}]), label_ids."""
+        sender (parsed lowercase address), to, subject, date, body
+        (plain text), attachments ([{filename, size_bytes}]), label_ids."""
 
     @abstractmethod
     def send(self, raw_b64):
-        """Send a base64url RFC822 message. -> {"id", "threadId"}."""
+        """Send a base64url RFC822 message.
+        -> {"id", "threadId", "message_id"?} — message_id is the RFC
+        Message-ID of the sent mail when the adapter can learn it; the
+        mailer prefers it for In-Reply-To/References bookkeeping."""
 
     @abstractmethod
     def mark_read(self, message_id):
@@ -96,11 +100,15 @@ def extract_text_body(raw_bytes):
 
 def build_raw(from_addr, to_addr, subject, body,
               in_reply_to=None, references=None):
-    """RFC822 bytes for a text/plain send, with optional threading."""
+    """RFC822 bytes for a text/plain send, with optional threading.
+
+    Sets an explicit Message-ID (Gmail preserves a supplied one): the
+    mailer threads on RFC Message-IDs, never on Gmail API ids."""
     m = EmailMessage()
     m["From"] = from_addr
     m["To"] = to_addr
     m["Subject"] = subject
+    m["Message-ID"] = make_msgid(domain=from_addr.split("@")[-1])
     if in_reply_to:
         m["In-Reply-To"] = in_reply_to
     if references:
@@ -118,19 +126,28 @@ def _from_addr(value):
 
 
 def poll_inbox(gmail, game_address=GAME_ADDRESS, since_days=2,
-               max_results=50):
+               max_results=50, skip_ids=None):
     """List candidate inbound messages and normalize them. Caller dedupes
     by id against its seen-set and feeds new ones to dispatch.
 
+    skip_ids: ids the mailer has already processed — they are skipped
+    BEFORE the get call, so re-polls cost one cheap list only
+    (quota-light). The query carries is:unread so processed-and-marked
+    messages never re-list; the seen-set covers the rest (mark_read is
+    best-effort and the process may restart).
+
     Returns [inbound], each: id, thread_id, header_message_id, sender,
     subject, date, body, attachments."""
-    query = f"to:{game_address} newer_than:{since_days}d -in:sent"
+    query = f"to:{game_address} newer_than:{since_days}d -in:sent is:unread"
+    skip = set(skip_ids or ())
     page_token = None
     out = []
     while True:
         page = gmail.list(query, max_results=max_results,
                           page_token=page_token)
         for ref in page.get("messages", []):
+            if ref["id"] in skip:
+                continue
             full = gmail.get(ref["id"])
             if _from_addr(full.get("from")) == game_address.lower():
                 continue  # our own sends — anti-loop guard
@@ -163,17 +180,26 @@ def _chain(*parts):
     return " ".join(out)
 
 
-def _record_send(games_dir, guid, sent_id, full_refs):
-    """Thread-state bookkeeping after a successful send."""
+def _record_send(games_dir, guid, rfc_message_id, full_refs):
+    """Thread-state bookkeeping after a successful send.
+
+    Stores the RFC Message-ID (what In-Reply-To/References need), not
+    the Gmail API id — a Gmail id in In-Reply-To threads by luck only."""
     db = _open_game_db(games_dir, guid)
     try:
         db.execute(
             "UPDATE games SET thread_message_id=?, thread_refs=?,"
             " last_email_at=? WHERE guid=?",
-            (sent_id, full_refs, _utcnow_iso(), guid))
+            (rfc_message_id, full_refs, _utcnow_iso(), guid))
         db.commit()
     finally:
         db.close()
+
+
+def _sent_rfc_id(sent):
+    """The RFC Message-ID to file for threading: prefer the adapter's
+    message_id, fall back to the Gmail id (self-heals on the next send)."""
+    return sent.get("message_id") or sent["id"]
 
 
 def send_outcome(games_dir, gmail, outcome, inbound, game_address=GAME_ADDRESS):
@@ -195,8 +221,9 @@ def send_outcome(games_dir, gmail, outcome, inbound, game_address=GAME_ADDRESS):
         raw = build_raw(game_address, to_addr, outcome.subject,
                         outcome.body, in_reply_to, refs or None)
         sent = gmail.send(base64.urlsafe_b64encode(raw).decode())
-        _record_send(games_dir, outcome.guid, sent["id"],
-                     _chain(refs, in_reply_to, sent["id"]))
+        rfc_id = _sent_rfc_id(sent)
+        _record_send(games_dir, outcome.guid, rfc_id,
+                     _chain(refs, in_reply_to, rfc_id))
         return sent["id"]
 
     if outcome.action == "clarify":
@@ -257,23 +284,66 @@ def maybe_nudge(games_dir, gmail, gm_unused=None, game_address=GAME_ADDRESS,
         subject, body = render_nudge(guid)
         raw = build_raw(game_address, row["player_email"], subject, body,
                         row["thread_message_id"], row["thread_refs"] or None)
-        sent_id = gmail.send(base64.urlsafe_b64encode(raw).decode())["id"]
-        _record_send(games_dir, guid, sent_id,
+        sent_msg = gmail.send(base64.urlsafe_b64encode(raw).decode())
+        rfc_id = _sent_rfc_id(sent_msg)
+        _record_send(games_dir, guid, rfc_id,
                      _chain(row["thread_refs"], row["thread_message_id"],
-                            sent_id))
-        sent.append({"guid": guid, "message_id": sent_id})
+                            rfc_id))
+        sent.append({"guid": guid, "message_id": sent_msg["id"]})
     return sent
+
+
+def _seen_db_path(games_dir):
+    return os.path.join(games_dir, "mailer.db")
+
+
+def _load_seen(games_dir):
+    """Ids already processed in a previous process lifetime. Empty set
+    when the mailer state DB doesn't exist yet."""
+    path = _seen_db_path(games_dir)
+    if not os.path.exists(path):
+        return set()
+    db = sqlite3.connect(path)
+    try:
+        return {r[0] for r in db.execute("SELECT message_id FROM seen_messages")}
+    finally:
+        db.close()
+
+
+def _store_seen(games_dir, message_ids):
+    """Record processed ids AFTER full processing (send + mark-read
+    attempted): at-least-once on crash, never silent loss."""
+    if not message_ids:
+        return
+    os.makedirs(games_dir, exist_ok=True)
+    db = sqlite3.connect(_seen_db_path(games_dir))
+    try:
+        db.execute("CREATE TABLE IF NOT EXISTS seen_messages"
+                   " (message_id TEXT PRIMARY KEY, first_seen_at TEXT)")
+        now = _utcnow_iso()
+        db.executemany(
+            "INSERT OR IGNORE INTO seen_messages (message_id, first_seen_at)"
+            " VALUES (?, ?)",
+            [(mid, now) for mid in message_ids])
+        db.commit()
+    finally:
+        db.close()
 
 
 def run_poll_cycle(games_dir, gmail, gm, game_address=GAME_ADDRESS,
                    seen_ids=None, turn_len_min=60):
     """One full mailer cycle: poll -> dispatch -> send -> mark read.
 
-    seen_ids persists across cycles (caller-owned); new ids are added.
+    seen_ids persists across cycles within a process; the on-disk
+    seen-set (mailer.db in games_dir) persists across restarts, so a
+    message that was processed but never marked read never runs a
+    duplicate turn. Crash between processing and the seen-record means
+    at-least-once re-dispatch — the audit log shows the duplicate.
     Returns {"outcomes": [...], "sent": [...], "nudged": [...]}."""
     from .dispatch import dispatch_batch  # local import: mailer is dispatch's client
     seen = set() if seen_ids is None else seen_ids
-    inbound = poll_inbox(gmail, game_address)
+    seen |= _load_seen(games_dir)
+    inbound = poll_inbox(gmail, game_address, skip_ids=seen)
     fresh = [m for m in inbound if m["id"] not in seen]
     for m in fresh:
         seen.add(m["id"])
@@ -297,6 +367,7 @@ def run_poll_cycle(games_dir, gmail, gm, game_address=GAME_ADDRESS,
             gmail.mark_read(m["id"])
         except Exception:
             pass  # read-marking is best-effort; the turn already ran
+    _store_seen(games_dir, [m["id"] for m in fresh])
     return {"outcomes": outcomes, "sent": sent,
             "nudged": maybe_nudge(games_dir, gmail, game_address=game_address)}
 
@@ -345,7 +416,10 @@ class FakeGmail(GmailClient):
         sid = f"out-{self._next}"
         self._next += 1
         self.outbox.append({"raw": raw, "parsed": parsed, "id": sid})
-        return {"id": sid, "threadId": parsed.get("Thread-Index", sid)}
+        # Faithful to the real adapter: message_id is the RFC Message-ID
+        # of what was actually sent (build_raw sets it explicitly).
+        return {"id": sid, "threadId": parsed.get("Thread-Index", sid),
+                "message_id": parsed["Message-ID"]}
 
     def mark_read(self, message_id):
         self.read_ids.add(message_id)

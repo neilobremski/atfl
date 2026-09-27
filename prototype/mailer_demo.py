@@ -56,17 +56,17 @@ check("signup marked read", fake.inbox[0]["id"] in fake.read_ids)
 guid8 = guid.replace("-", "")[:8]
 
 # --- 2. reply with GUID: turn 2 continues the same thread ---
-turn1_id = fake.outbox[-1]["id"]
 fake.queue_inbound(PLAYER, f"Re: [ATFL {guid8}] Above the Fog Line",
                    f"drink\n\nGame code: {guid}",
                    header_message_id="<reply-2@fake>")
 res = run_poll_cycle(games_dir, fake, gm, seen_ids=seen)
 check("reply produced a turn email", res["sent"][-1]["action"] == "turn_email")
 m2 = last_sent()
-check("turn 2 In-Reply-To is turn 1's sent id",
-      m2["In-Reply-To"] == turn1_id)
+check("turn 2 In-Reply-To is turn 1's RFC Message-ID (not the Gmail id)",
+      m2["In-Reply-To"] == m1["Message-ID"])
 check("References chain carries the thread history",
-      "<signup-1@fake>" in (m2["References"] or "") and turn1_id in (m2["References"] or ""))
+      "<signup-1@fake>" in (m2["References"] or "")
+      and str(m1["Message-ID"]) in (m2["References"] or ""))
 check("subject stays constant for threading",
       str(m2["Subject"]) == str(m1["Subject"]))
 
