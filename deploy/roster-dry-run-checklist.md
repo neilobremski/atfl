@@ -32,9 +32,15 @@ account; use a scratch game that sends only to Neil/the operator's own address).
 ## 2. Point the rig at the roster, run the dry game
 
 1. Set `ATFL_GM=roster` in `/etc/atfl/atfl.env`. Restart the unit.
-2. Seed a scratch game for the operator's own address only
+2. Dry-run the two-turn scratch game in-process, no email needed:
+   `python -m server.dry_run --email <operator-own-address>`. It plays
+   turns 1+2 through real dispatch, then reports outcome actions, ledger
+   row counts, and a denylist leak check against both rendered emails.
+   `dry run: PASS` is the gate for step 3; `FAIL` prints which side
+   broke (missing roster / failed outcome / leak hits).
+3. Seed a scratch game for the operator's own address only
    (`server/seed.py fog-line-mystery-v1`), so no outsider ever sees a turn.
-3. Let one poll cycle produce turn 1. Watch the log:
+4. Let one poll cycle produce turn 1. Watch the log:
    - two tells fire in order: `adjudicate` (bare JSON), then
      `compose_narrative` (≤2000 words);
    - the envelope went to the roster, not the DB — nothing hidden leaked
