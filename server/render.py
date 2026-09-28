@@ -214,15 +214,22 @@ def render_nudge(guid):
     """§5.3 standalone nudge (fallback only): plain system voice, ≤120
     words, never in-character, no mechanics talk. Sent as a thread
     reply; mutates nothing. Prose itself is a review checkpoint (§5) —
-    this wording is placeholder structure per §2.4, not locked copy."""
+    this wording is placeholder structure per §2.4, not locked copy.
+
+    Structural rule (2026-09-27): the nudge must never assert anything
+    about current world state. It fires when ≥24h passed with no turn
+    email at all (idle pipeline down), so "nothing has changed" is the
+    one claim it cannot verify — a prior idle turn's conservative
+    default may have mutated things. Instead it points at the last turn
+    email, which by §2.5 is always the latest confirmed world view."""
     guid8 = guid.replace("-", "")[:8]
     subject = f"[ATFL {guid8}] Above the Fog Line"
     body = ("\n".join([
         "Still here — your game is waiting whenever you are.",
         "",
-        "Nothing has changed in the world since your last turn; the fog",
-        "is exactly where you left it. Reply to this email with what you",
-        "do next, and include your Game code if you start a fresh message.",
+        "Your last turn email has the latest on the world. Reply to that",
+        "email — or to this one — with what you do next, and include your",
+        "Game code if you start a fresh message.",
         "",
         f"Game code: {guid}",
     ]))

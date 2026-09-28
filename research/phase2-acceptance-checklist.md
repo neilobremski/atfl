@@ -71,11 +71,15 @@ Legend:
 
 **No fiction outside turns**
 - Standalone nudges ≤1/24h, ≤120 words, mutate nothing, reveal nothing:
-  **PROVEN** (mailer_demo). Known copy edge (logged 2026-09-27, to fix
-  at copy lock): the nudge says "Nothing has changed" but the firing
-  window can include a prior idle turn that *did* change things
-  (conservative-default mutations). Nudge copy is placeholder structure
-  per §2.4 — reconcile at lock.
+  **PROVEN** (mailer_demo). Known copy edge (logged 2026-09-27):
+  the nudge said "Nothing has changed" but the firing window can
+  include a prior idle turn that *did* change things
+  (conservative-default mutations) — **RESOLVED 2026-09-27**: the nudge
+  no longer asserts anything about world state; it points at the last
+  turn email (§2.5 makes it the latest confirmed view). Structural rule
+  recorded in render.render_nudge's docstring + 2 new mailer_demo
+  checks (state-claim denylist, last-turn-email pointer). Nudge prose
+  stays placeholder per §2.4, still Neil's eye at copy lock.
 - No system email in-character: **CODE** (clarification + nudge
   templates are plain system voice; asserted ≤120 words for the nudge).
 

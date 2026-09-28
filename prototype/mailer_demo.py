@@ -172,6 +172,16 @@ check("nudge is a thread reply, not a fresh thread",
       mn["In-Reply-To"] is not None)
 check("nudge is short (<=120 words per §2.4)",
       len(plain(mn).split()) <= 120)
+# 2026-09-27: the nudge fires when the pipeline is unverified, so it
+# must never assert anything about current world state (the old copy
+# claimed "nothing has changed" — false after an idle turn's default
+# mutations). Denylist pins the structural rule, not the prose.
+check("nudge asserts nothing about world state",
+      not any(p in plain(mn).lower() for p in
+              ["nothing has changed", "exactly where you left", "unchanged",
+               "untouched", "the fog is"]))
+check("nudge points at the last turn email (latest confirmed view)",
+      "last turn email" in plain(mn))
 check("nudge has an HTML twin", html(mn) is not None
       and "your game is waiting" in html(mn))
 turns_after = sqlite3.connect(f"{games_dir}/{guid}.db").execute(
