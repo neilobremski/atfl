@@ -177,3 +177,69 @@ Carried, unchanged: (2) OpenCode sign-in vs. Zen key (his credentials; $20
 top-up caveat is his spending call); (3) Cursor/Muse/Devon keys later.
 Nothing new added — this pass introduced no creative forks and no
 irreversible choices.
+
+---
+
+## Live two-tell exercise — corrections (2026-09-28, session #33)
+
+Ran the real thing against the registered `fogline-gm` roster on this VM:
+`pick_plot` → `adjudicate` → `compose_narrative` tells sent as `murph`
+via `a8s tell fogline-gm`, envelopes built by the real
+`server.gm.build_envelope` from the seeded scenario world. Two results
+were clean, one is still in flight, and the exercise corrected four
+design assumptions in this doc:
+
+**Verified.**
+- `pick_plot`: keeper answered `earth-changing` (bare slug, nothing else),
+  recorded the pick in its k7e craft notes with correct secrecy framing,
+  and replied by `tell murph` — the reply landed in the sender's a8s
+  mailbox as `from fogline-gm:keeper`.
+- `adjudicate`: keeper → arbiter → critic chain ran exactly as chartered
+  (keeper routed with bare `tell arbiter`; critic returned `CLEAR` twice).
+  The reply to murph was a **bare JSON array, no fences** — 7 questions,
+  yes/no-only, effects on `object:water-bottle` / `actor:player` with
+  `physical_state.*` keys only. The server's `_validate_questions` passes
+  on it verbatim, and the secrecy denylist finds no hits. Arbiter's
+  rationales show the hard rules landed (it refused to write `holder`
+  because `holder` sits outside `physical_state`).
+- `compose_narrative`: sent and received by the node; the keeper-drafts →
+  critic-reviews → keeper-replies chain had not yet run when the session
+  ended (see wake-slot note below). Prose discipline unverified — next
+  session reads the reply from murph's mailbox.
+
+**Corrections (design changes).**
+1. **The transport is async, not synchronous.** `r4t tell` is the owner's
+   impersonation verb — it queues a message and returns; nothing comes
+   back on stdout. `RosterGM._tell_real`'s "shell out and read stdout as
+   the reply" assumption is wrong. Real contract: server sends
+   `a8s tell fogline-gm '<envelope>'`, then **waits on its own a8s
+   mailbox** for keeper's reply (attributed `from fogline-gm:keeper`,
+   correlated by game_guid/turn_no/call carried in the reply thread).
+   The adapter needs a rework: send + poll-mailbox-with-timeout instead
+   of subprocess-stdout. Item 3's "spawns the roster synchronously"
+   language above is superseded.
+2. **The fogline-gm a8s node must be running.** Tells sent while the node
+   was down sat in the S3 mailbox unprocessed; `a8s start fogline-gm`
+   drained them. Deploy consequence: free-micro-1 must run the roster
+   node (start on boot) alongside the game server.
+3. **Sender identity = the game server's own a8s node.** Keeper replies
+   to the inbound sender (`tell murph` in the exercise). Production must
+   not reuse murph's personal mailbox: register a dedicated mailbox-only
+   a8s node (e.g. `atfl-server`, never started — the server reads its
+   inbox files directly) and send tells from inside its root so the
+   sender stamps correctly.
+4. **The compose_narrative envelope must carry the approved mutations.**
+   External tells open fresh a8s threads, so keeper's narrative turn
+   cannot see the adjudication answers from the earlier tell — but the
+   narrative has to be built from them. Decision: add the validated
+   question array to the envelope on `compose_narrative` calls (new key
+   next to the fixed set; charter updated to name it). Not yet
+   implemented — next session's code task, along with the adapter
+   rework in (1).
+5. **Wake latency is minutes-scale and the idle pass holds the single
+   wake slot.** Observed: 4.5 min from receipt to wake once; the second
+   time, a `r4t idle` dreaming/distillation pass (k7e distill of keeper's
+   turn) occupied the wake slot for 15+ min with the compose tell queued
+   behind it. The server's reply-wait timeout must be generous (tens of
+   minutes, not the 300s subprocess timeout), or the poll cycle must
+   send-and-return and pick the reply up on a later cycle.

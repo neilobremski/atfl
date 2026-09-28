@@ -18,10 +18,26 @@ opencode works with no login on the free path (verified 2026-09-28).
 
 ## 0. Preconditions (before touching the VM)
 
-- [ ] `r4t tell fogline-gm` answers from the opencode rig on the operator
-      machine — the same rig must exist on free-micro-1 under the `atfl` user.
-      (Memory, 2026-09-28: Tailscale plan gives SSH once Neil runs the one-time
-      Mac-side install; without it there is no terminal path to the VM.)
+- [ ] The `fogline-gm` **a8s node is running** (`a8s start fogline-gm`) on
+      the operator machine — tells are async a8s messages and are only
+      processed while the node runs (verified 2026-09-28: a tell sent while
+      the node was down sat in the S3 mailbox unprocessed). The same
+      applies on free-micro-1: the roster node must be started (and
+      restarted on boot) alongside the game server. The opencode rig must
+      exist under the `atfl` user with `opencode` on the r4t worker PATH
+      (Memory, 2026-09-28: Tailscale plan gives SSH once Neil runs the
+      one-time Mac-side install; without it there is no terminal path to
+      the VM).
+- [ ] **Transport rework done** (session #33): `RosterGM` no longer shells
+      out to `r4t tell` expecting the reply on stdout — that path is
+      architecturally wrong (`r4t tell` is the owner's async impersonation
+      verb). The adapter sends `a8s tell fogline-gm '<envelope>'` and waits
+      on the game server's own a8s mailbox (`atfl-server`, mailbox-only
+      node, never started) for keeper's reply, with a tens-of-minutes
+      timeout (roster wake latency is minutes-scale; the `r4t idle`
+      dreaming pass can hold the single wake slot 15+ min). The
+      `compose_narrative` envelope carries the approved adjudication array
+      (fresh a8s threads per tell — keeper can't see the earlier tell).
 - [ ] Repo green locally: all `prototype/*_demo.py` pass, `poll --fake` smoke
       clean. RosterGM behavior is already pinned hermetically
       (`prototype/roster_demo.py`, 48 checks).
