@@ -54,9 +54,17 @@ Install the unit, then enable + start:
 
 ```bash
 sudo cp /srv/atfl/atfl/deploy/atfl.service /etc/systemd/system/atfl.service
+sudo systemd-analyze verify atfl.service   # must come back clean (see note)
 sudo systemctl daemon-reload && sudo systemctl enable --now atfl
 journalctl -u atfl -f   # per-cycle logs land here
 ```
+
+Verify note: `systemd-analyze verify` is the standing pre-deploy check for
+this unit — never edit `atfl.service` without running it. On the real VM the
+run is clean; the unit's structural invariants (paths, `atfl:atfl`,
+`Restart=always`/30s, hardening, `WantedBy`) are pinned in
+`prototype/deploy_demo.py`, which re-runs the verify pass hermetically
+wherever `systemd-analyze` exists.
 
 ## Updates
 
