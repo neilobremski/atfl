@@ -2,9 +2,19 @@
 
 First-time flip of `ATFL_GM=mock` → `roster` on the game VM, with rollback.
 Prerequisites: this file assumes the `fogline-gm` R4T roster has been created
-with the OpenCode path (standing OQ#2), and a test Gmail identity is available
+(the roster now exists at `~/ar3/fogline-gm/r4t.md`, registered 2026-09-28 —
+see note below), and a test Gmail identity is available
 (standing OQ#1/#4 — the dry run sends real turn emails, so it needs a real
 account; use a scratch game that sends only to Neil/the operator's own address).
+
+**2026-09-28 (session #32):** the `fogline-gm` roster exists and answers on
+the opencode free path (keeper/arbiter/critic, one turn at a time, rig
+budget 8/hour). Machine note for the VM: the r4t worker PATH must contain
+`opencode` — here fixed by symlinking `~/.opencode/bin/opencode` into
+`~/.local/bin/` (first live turn failed with exit 127 until that landed);
+the same fix (or PATH export) is needed on free-micro-1 under the `atfl`
+user before the flip. The OpenCode sign-in precondition is retired —
+opencode works with no login on the free path (verified 2026-09-28).
 
 ## 0. Preconditions (before touching the VM)
 

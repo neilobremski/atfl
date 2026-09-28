@@ -157,9 +157,13 @@ and the malformed-output path (42 checks, hermetic — scripted
 before any live flip.
 
 1. **Now (code-free):** this doc. Nothing to build until the roster exists.
-2. **After Neil's one-time OpenCode sign-in** (open question #2): create
-   `~/ar3/fogline-gm/r4t.md` + rig wiring per
-   `research/r4t-opencode-gm-plan.md` §5; first tells are smoke tests.
+2. **~~After Neil's one-time OpenCode sign-in~~ (retired 2026-09-28 — opencode
+   needs no login on the free path; done in session #32):** `~/ar3/fogline-gm/r4t.md`
+   created and registered: three members (keeper/leader, arbiter, critic), each
+   with its own role and separate `Knowledge: small` k7e store, opencode rig
+   `gm-worker` (8/hour, max 24), single-turn contract. First smoke tell answered
+   by keeper in 10.3s. Machine quirk found and fixed: opencode must be on the
+   r4t worker PATH (symlinked into ~/.local/bin/; first turn failed exit 127).
 3. **Then:** `RosterGM` adapter in `server/gm.py` behind the `GameMaster`
    interface, config-gated, mock remains default; new `prototype/roster_demo.py`
    pins the envelope schema and the malformed-output retry path (hermetic —
