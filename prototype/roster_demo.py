@@ -190,6 +190,42 @@ check("game still on turn 2 after failed turn 3",
       dict(db.execute("SELECT * FROM games").fetchone())["turn_no"] == 2)
 db.close()
 
+print("\n== 7b. hallucinated entity slug -> TurnFailed, retry, failed turn ==")
+# Case 2 of research/phase4-truth-rule-worked-examples.md: the roster
+# answers "yes" with an effect on a slug that doesn't exist. Shape
+# validation passes; the commit-side existence check (apply_effect)
+# must raise TurnFailed so the §2.6 path honors it.
+HALLUCINATED = [{
+    "q": "Does Mara give the player her lantern?", "answer": "yes",
+    "rationale": "she's grateful for the water you shared",
+    "effect": {"object:mara-lantern": {"physical_state.owner": "player"}}}]
+phantom_gm = RosterGM(tell_fn=lambda j: json.dumps(HALLUCINATED)
+                      if json.loads(j)["call"] == "adjudicate"
+                      else "Mara hands you the lantern.")
+db = sqlite3.connect(os.path.join(GAMES, f"{guid}.db"))
+db.row_factory = sqlite3.Row
+n_mut_before = db.execute("SELECT COUNT(*) FROM mutations").fetchone()[0]
+n_turns_before = db.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+db.close()
+o = dispatch_message(GAMES, "neil@example.com", f"Re: [ATFL {guid[:8]}]",
+                     "Mara hands me her lantern." + f"\n\nGame code: {guid}",
+                     phantom_gm)
+check("hallucinated slug -> failed outcome", o.action == "failed")
+check("failure note names the retry", "twice" in o.note)
+db = sqlite3.connect(os.path.join(GAMES, f"{guid}.db"))
+db.row_factory = sqlite3.Row
+check("game still on turn 2 after phantom-slug turn",
+      dict(db.execute("SELECT * FROM games").fetchone())["turn_no"] == 2)
+check("no new turn row committed",
+      db.execute("SELECT COUNT(*) FROM turns").fetchone()[0] == n_turns_before)
+check("no ledger rows from the phantom turn",
+      db.execute("SELECT COUNT(*) FROM mutations").fetchone()[0] == n_mut_before)
+check("bottle water_ml untouched",
+      json.loads(dict(db.execute(
+          "SELECT * FROM objects WHERE slug='water-bottle'").fetchone())
+                 ["physical_state"])["water_ml"] == 350)
+db.close()
+
 print("\n== 8. roster narrative still passes the secrecy check ==")
 leak_gm = RosterGM(tell_fn=lambda j:
                    "You feel the earth changing all around you.")

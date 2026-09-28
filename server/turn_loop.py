@@ -148,7 +148,16 @@ def build_catchup(db, game_guid, turn_no, last_player_turn):
 
 def apply_effect(db, turn_id, etype, slug, field, new_value, cause):
     table = {"place": "places", "actor": "actors", "object": "objects"}[etype]
-    row = _row(db, table, slug)
+    raw = db.execute(f"SELECT * FROM {table} WHERE slug=?", (slug,)).fetchone()
+    if raw is None:
+        # Model-independent defense (§4 of phase4-truth-rule-worked-examples):
+        # the GM may only mutate entities it was shown. A target slug with
+        # no DB row is a hallucinated entity — this is TurnFailed
+        # (retry-eligible, turn dies silently), never a raw crash, so the
+        # dispatch §2.6 path honors it exactly like any other model failure.
+        raise TurnFailed(
+            f"no {table} row for slug {slug!r}: GM targeted a nonexistent entity")
+    row = dict(raw)
     root, _, sub = field.partition(".")
     state = json.loads(row[root])
     old = state.get(sub)
