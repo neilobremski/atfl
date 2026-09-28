@@ -1,10 +1,15 @@
 """Deployment-shape smoke test — server/config.py + server/poll.py.
 
 Runs poll.run_once against FakeGmail + MockGM in a temp games dir with
-ATFL_GAME_ADDRESS set, plus the config failure modes. No network, no
-token, nothing durable. Everything must stay green.
+ATFL_GAME_ADDRESS set, plus the config failure modes. Also pins the
+deploy/atfl.service unit's structural invariants and, where available,
+runs systemd-analyze verify against it. No network, no token, nothing
+durable. Everything must stay green.
 """
+import configparser
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -83,6 +88,85 @@ with tempfile.TemporaryDirectory() as tmp:
     os.environ["ATFL_GAME_ADDRESS"] = "game@example.com"  # config.load reads real env
     rc = poll.main(["--fake"])
     check("poll.main(['--fake']) exits 0", rc == 0)
+
+# --- deploy/atfl.service unit pins (session #24, 2026-09-27) ---
+# systemd-analyze verify pass 2026-09-27: the unit parses cleanly — the only
+# atfl.service line in its output is the expected env gap ("Command
+# /srv/atfl/venv/bin/python is not executable") because the venv lives on
+# free-micro-1, not wherever the check runs. Any other atfl.service line
+# (Unknown / Failed / refusing / invalid) would be a real unit bug. The
+# structural pins below are hermetic so the demo stays green anywhere; the
+# verify run itself is guarded on the binary's presence.
+unit_path = os.path.join(os.path.dirname(__file__), "..", "deploy",
+                         "atfl.service")
+cp = configparser.ConfigParser(strict=False)
+cp.optionxform = str  # keep directive case exactly as written
+parsed = cp.read(unit_path)
+check("deploy/atfl.service exists and parses", len(parsed) == 1)
+
+known_directives = {
+    "Unit": {"Description", "After", "Wants"},
+    "Service": {"Type", "User", "Group", "WorkingDirectory",
+                "EnvironmentFile", "ExecStart", "Restart", "RestartSec",
+                "NoNewPrivileges", "ProtectSystem", "ReadWritePaths",
+                "ProtectHome", "PrivateTmp"},
+    "Install": {"WantedBy"},
+}
+check("unit has exactly [Unit]/[Service]/[Install] sections",
+      set(cp.sections()) == set(known_directives))
+check("unit uses only known directives (no typos or strays)",
+      all(set(cp.options(sec)) <= known_directives[sec]
+          for sec in known_directives))
+
+svc = dict(cp.items("Service"))
+check("unit: Type=simple, Restart=always, RestartSec=30",
+      svc.get("Type") == "simple" and svc.get("Restart") == "always"
+      and svc.get("RestartSec") == "30")
+check("unit: runs as atfl:atfl",
+      svc.get("User") == "atfl" and svc.get("Group") == "atfl")
+check("unit: WorkingDirectory matches README checkout path",
+      svc.get("WorkingDirectory") == "/srv/atfl/atfl")
+check("unit: EnvironmentFile matches README env path",
+      svc.get("EnvironmentFile") == "/etc/atfl/atfl.env")
+check("unit: ExecStart is the venv python running the poll loop",
+      svc.get("ExecStart", "").split()[:2] ==
+      ["/srv/atfl/venv/bin/python", "-m"] and
+      "server.poll" in svc.get("ExecStart", ""))
+# NOTE: the --fake smoke run above left ATFL_GAMES_DIR set in os.environ;
+# clear it so this asserts the shipped default, not the temp dir.
+os.environ.pop("ATFL_GAMES_DIR", None)
+c_default = config.load(cfg(ATFL_GAME_ADDRESS="game@example.com"))
+check("unit: ReadWritePaths covers the config-default games dir",
+      c_default["games_dir"] == "/var/lib/atfl/games"
+      and svc.get("ReadWritePaths") == "/var/lib/atfl")
+check("unit: hardening directives pinned",
+      svc.get("NoNewPrivileges") == "true"
+      and svc.get("ProtectSystem") == "strict"
+      and svc.get("ProtectHome") == "true"
+      and svc.get("PrivateTmp") == "true")
+check("unit: ordered after network-online.target",
+      "network-online.target" in cp.get("Unit", "After"))
+check("unit: wanted by multi-user.target",
+      cp.get("Install", "WantedBy") == "multi-user.target")
+
+analyzer = shutil.which("systemd-analyze")
+if analyzer is None:
+    print("SKIP systemd-analyze verify (binary absent on this machine)")
+    checks.append(("systemd-analyze verify skipped: binary absent", True))
+else:
+    proc = subprocess.run([analyzer, "verify", unit_path],
+                          capture_output=True, text=True, timeout=60)
+    svc_lines = [l for l in proc.stderr.splitlines()
+                 if "atfl.service" in l]
+    real_errors = [l for l in svc_lines
+                   if any(tok in l for tok in ("Unknown", "Failed",
+                                              "refusing", "invalid",
+                                              "Illegal"))]
+    check("systemd-analyze verify: no atfl.service parser errors",
+          real_errors == [])
+    only_known_gap = all("is not executable" in l for l in svc_lines)
+    check("systemd-analyze verify: only the known target-VM-path gap "
+          "(or silence on the real VM)", only_known_gap)
 
 failed = [n for n, ok in checks if not ok]
 print(f"\n{len(checks) - len(failed)}/{len(checks)} checks green")

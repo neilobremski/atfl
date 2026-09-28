@@ -19,7 +19,11 @@ Legend:
    records the pick as a game-level mutation, verified in demos.
 4. Server up on free-micro-1 — **CODE**. Poll entry + systemd unit +
    deploy doc exist; deployment itself needs #1 (and Neil's OAuth for
-   token.json, OQ#5).
+   token.json, OQ#5). Unit verified 2026-09-27: `systemd-analyze verify`
+   reports zero parser errors (only the expected not-executable line for
+   the target-VM venv path); structural invariants (paths vs README,
+   atfl:atfl, Restart=always, hardening) pinned in deploy_demo.py
+   (25/25 green) so future unit edits are gated.
 
 ## §6.2 Acceptance checklist — box by box
 
