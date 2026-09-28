@@ -148,6 +148,14 @@ bloat/stalls over a month of play. Mitigations, in order:
 
 ## Ordering (what lands when)
 
+**2026-09-28 (session #27) — item 3 DONE:** `RosterGM` adapter lives in
+`server/gm.py` (behind the `GameMaster` interface, `context` kwarg for
+envelope metadata), `prototype/roster_demo.py` pins the envelope schema
+and the malformed-output path (42 checks, hermetic — scripted
+`tell_fn`, no roster needed). `config.py` takes `ATFL_GM=mock|roster`
+(mock default; 'real' retired). Waiting on item 2 (the roster itself)
+before any live flip.
+
 1. **Now (code-free):** this doc. Nothing to build until the roster exists.
 2. **After Neil's one-time OpenCode sign-in** (open question #2): create
    `~/ar3/fogline-gm/r4t.md` + rig wiring per

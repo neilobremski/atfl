@@ -23,7 +23,7 @@ import traceback
 
 from . import config
 from .gmail_adapter import GoogleApiGmail, build_service, messages_resource
-from .gm import MockGM
+from .gm import MockGM, RosterGM
 from .mailer import run_poll_cycle
 
 log = logging.getLogger("atfl.poll")
@@ -62,9 +62,9 @@ def run_once(gmail, gm, cfg):
 
 
 def build_clients(cfg):
-    """gm (MockGM for now) and the Gmail client (real adapter once the
-    token exists). Called once at startup."""
-    gm = MockGM()  # config.load already refused ATFL_GM=real
+    """gm per ATFL_GM (mock default; RosterGM for 'roster') and the Gmail
+    client (real adapter once the token exists). Called once at startup."""
+    gm = RosterGM() if cfg["gm"] == "roster" else MockGM()
     service = build_service(cfg["token_path"])  # raises until OQ#1 closes
     gmail = GoogleApiGmail(messages_resource(service))
     return gmail, gm

@@ -45,11 +45,13 @@ check("missing ATFL_GAME_ADDRESS refused", err is not None)
 check("refusal names the game-address blocker", "ATFL_GAME_ADDRESS" in err)
 check("blank ATFL_GAME_ADDRESS also refused", raises({"ATFL_GAME_ADDRESS": "  "}) is not None)
 
-# --- 3. GM gate (open question #2): 'real' raises until the roster is wired ---
-err = raises({**BASE, "ATFL_GM": "real"})
-check("ATFL_GM=real refused", err is not None)
-check("refusal names the roster blocker", "roster" in err.lower() or "question #2" in err)
-check("ATFL_GM=bogus refused", raises({**BASE, "ATFL_GM": "bogus"}) is not None)
+# --- 3. GM backend gate: 'mock' default, 'roster' loads, junk refused ---
+cfg = load({**BASE, "ATFL_GM": "roster"})
+check("ATFL_GM=roster loads (roster backend selectable)", cfg["gm"] == "roster")
+for bad in ("real", "bogus"):
+    err = raises({**BASE, "ATFL_GM": bad})
+    check(f"ATFL_GM={bad} refused", err is not None)
+check("ATFL_GM case/space tolerant", load({**BASE, "ATFL_GM": " Roster "})["gm"] == "roster")
 
 # --- 4. image-mode gate (open question #6) ---
 err = raises({**BASE, "ATFL_IMAGES": "real"})

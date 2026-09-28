@@ -23,7 +23,7 @@ import re
 import time
 from datetime import datetime, timezone
 
-from .gm import PLOT_ROSTER
+from .gm import PLOT_ROSTER, game_clock_label
 
 
 class TurnFailed(Exception):
@@ -194,6 +194,9 @@ def run_turn(db, player_input, gm, turn_len_min=60):
 
     turn_no = g["turn_no"] + 1
     clock_start = g["game_clock_min"]
+    # RosterGM envelope metadata (MockGM ignores context).
+    ctx = {"game_guid": g["guid"], "turn_no": turn_no,
+           "game_clock": game_clock_label(clock_start)}
     now = datetime.now(timezone.utc).isoformat()
 
     turn_id = db.execute(
@@ -207,7 +210,7 @@ def run_turn(db, player_input, gm, turn_len_min=60):
 
     # 1b. turn-1 plot pick (§3.3.2 / §4.1): game-level mutation, never changed
     if turn_no == 1:
-        pick = gm.pick_plot(PLOT_ROSTER)
+        pick = gm.pick_plot(PLOT_ROSTER, context=ctx)
         assert pick in PLOT_ROSTER, f"plot pick {pick!r} not on the §4.3 roster"
         db.execute("UPDATE games SET plot_concept=? WHERE guid=?", (pick, g["guid"]))
         _mutate(db, turn_id, "game", 0, "plot_concept", None, pick,
@@ -223,7 +226,7 @@ def run_turn(db, player_input, gm, turn_len_min=60):
 
     # 2. yes/no mutations
     t0 = time.perf_counter()
-    questions = gm.adjudicate(player_input, filtered)
+    questions = gm.adjudicate(player_input, filtered, context=ctx)
     adjudicate_ms = (time.perf_counter() - t0) * 1000.0
     if not questions:
         raise TurnFailed("GM produced no adjudication output")
@@ -242,7 +245,7 @@ def run_turn(db, player_input, gm, turn_len_min=60):
 
     # 3. narrative + secrecy check — must pass BEFORE anything is sent
     t1 = time.perf_counter()
-    narrative = gm.compose_narrative(player_input, questions, filtered, catchup)
+    narrative = gm.compose_narrative(player_input, questions, filtered, catchup, context=ctx)
     narrative_ms = (time.perf_counter() - t1) * 1000.0
     try:
         secrecy_check(narrative, _denylist(db, g["guid"]))

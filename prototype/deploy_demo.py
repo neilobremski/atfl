@@ -42,9 +42,9 @@ except config.ConfigError:
 
 try:
     config.load(cfg(ATFL_GAME_ADDRESS="game@example.com", ATFL_GM="real"))
-    check("config refuses ATFL_GM=real until OQ#2 closes", False)
+    check("config refuses unknown ATFL_GM value 'real'", False)
 except config.ConfigError:
-    check("config refuses ATFL_GM=real until OQ#2 closes", True)
+    check("config refuses unknown ATFL_GM value 'real'", True)
 
 try:
     config.load(cfg(ATFL_GAME_ADDRESS="game@example.com", ATFL_POLL_MIN="0"))

@@ -14,8 +14,10 @@ the free-micro-1 layout; override with env vars locally.
                         silently run against the stub.
     ATFL_POLL_MIN       inbox poll cadence, minutes (default 5)
     ATFL_TURN_LEN_MIN   game-turn length, minutes (default 60 — DESIGN.md §2.1)
-    ATFL_GM             'mock' (default) or 'real'. 'real' raises until
-                        open question #2 (R4T GM model) is closed.
+    ATFL_GM             'mock' (default) or 'roster'. 'roster' wires the
+                        R4T fogline-gm roster through server/gm.py RosterGM;
+                        needs the roster live on the host (phase 4). Values
+                        other than 'mock'/'roster' raise.
     ATFL_IMAGES         'off' (default), 'stub' or 'real'. 'stub' wires the
                         deterministic placeholder provider into turn emails;
                         'real' raises until the image API key exists (open
@@ -33,12 +35,10 @@ def load(env=os.environ):
     """Read config from env; raise ConfigError on anything missing or
     nonsensical. Failing loudly at startup beats silently polling a stub."""
     gm = env.get("ATFL_GM", "mock").strip().lower()
-    if gm not in ("mock", "real"):
-        raise ConfigError(f"ATFL_GM must be 'mock' or 'real', got {gm!r}")
-    if gm == "real":
-        raise ConfigError(
-            "ATFL_GM=real needs the R4T roster model wired (open question #2); "
-            "the GameMaster interface is ready for it (server/gm.py).")
+    if gm not in ("mock", "roster"):
+        raise ConfigError(f"ATFL_GM must be 'mock' or 'roster', got {gm!r}")
+    # 'roster' needs the fogline-gm roster on the host (phase4 doc);
+    # the RosterGM adapter fails loudly at call time if it is missing.
 
     address = env.get("ATFL_GAME_ADDRESS", "").strip()
     if not address:
