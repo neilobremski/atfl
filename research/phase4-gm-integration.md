@@ -279,3 +279,37 @@ PATH" when a8s is absent).
    behind it. The server's reply-wait timeout must be generous (tens of
    minutes, not the 300s subprocess timeout), or the poll cycle must
    send-and-return and pick the reply up on a later cycle.
+
+## In-flight call starvation — keeper's self-review ate the return leg (2026-09-28, session #37)
+
+Live finding from the first atfl-server round trip. The atfl-server
+`adjudicate` tell (published 2026-09-29 04:13:40 UTC, GUID-EXERCISE-001
+turn 1) was processed normally — keeper routed to arbiter (04:46 UTC),
+arbiter returned a 6-question array (04:48 UTC) — but keeper never
+completed the return leg: the queued keeper message on adjudicate thread
+01M3NQKQ5F4HN9CQ80SZ615SGV was drained without a turn, and nothing ever
+reached atfl-server's mailbox.
+
+Root cause: keeper had self-initiated an idle-turn review thread at
+03:32 UTC (before the tell arrived) and stayed in it through the whole
+window. The self-review was genuine QA, not noise — keeper and critic
+built set-of-record files (md5s, baselines) and found two real
+transcription fidelity errors in how the array's questions were reported
+(slot 3 dropped the "stop" branch of the change/stop/hold-steady
+disjunction; slot 6 said "capped-off" against physical_state.cap_on=false
+— the array itself was critic-verified CLEAR), corrected in
+~/ar3/fogline-gm/.files/setofrecord_guid-exercise-001_turn1_20260929T0524.txt.
+Keeper also drafted a 509-word turn-1 narrative from the adjudicate
+envelope unprompted (pre-drafting for the anticipated compose_narrative
+tell; sent to critic for a secrecy read — within charter, but noted).
+
+Design consequences (open, for the charter + RosterGM):
+1. An open inbound call's return leg must outrank self-initiated review —
+   idle-turn review yields when a call thread is pending.
+2. RosterGM needs a re-prompt path when the poll exhausts reply_wait_s
+   with no reply (currently a silent timeout); the recovery mechanism
+   used here was an operator re-prompt tell instructing keeper to forward
+   arbiter's already-produced array verbatim via `tell atfl-server`.
+3. Critic's pre-send review needs a fidelity check (byte-level question
+   reproduction) in addition to shape/secrecy — transcription drift was
+   only caught post-delivery this time.
