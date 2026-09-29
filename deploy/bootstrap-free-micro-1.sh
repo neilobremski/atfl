@@ -109,8 +109,8 @@ as_atfl env PATH="$ATFL_HOME/.local/bin:$PATH" command -v opencode >/dev/null 2>
 # ------------------------------------------------------------ a8s node (once)
 log "a8s node $NODE_NAME"
 NODE_ROOT="$ATFL_HOME/a8s/$NODE_NAME"
-as_atfl mkdir -p "$ATFL_HOME/a8s"
-if [[ -d "$NODE_ROOT" && -n "$(ls -A "$NODE_ROOT" 2>/dev/null)" ]]; then
+as_atfl mkdir -p "$NODE_ROOT"   # a8s add requires the node dir to exist
+if [[ -n "$(ls -A "$NODE_ROOT" 2>/dev/null)" ]]; then
   echo "node dir $NODE_ROOT already populated, keeping (delete it to re-register)"
 else
   as_atfl "$A8S_BIN" add "$NODE_NAME" "$NODE_ROOT"
