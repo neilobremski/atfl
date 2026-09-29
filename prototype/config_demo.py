@@ -46,12 +46,24 @@ check("refusal names the game-address blocker", "ATFL_GAME_ADDRESS" in err)
 check("blank ATFL_GAME_ADDRESS also refused", raises({"ATFL_GAME_ADDRESS": "  "}) is not None)
 
 # --- 3. GM backend gate: 'mock' default, 'roster' loads, junk refused ---
-cfg = load({**BASE, "ATFL_GM": "roster"})
+err = raises({**BASE, "ATFL_GM": "roster"})
+check("ATFL_GM=roster without ATFL_A8S_NODE_ROOT refused", err is not None)
+check("refusal names the node-root blocker", "ATFL_A8S_NODE_ROOT" in err)
+cfg = load({**BASE, "ATFL_GM": "roster", "ATFL_A8S_NODE_ROOT": "/srv/atfl/a8s/atfl-server"})
 check("ATFL_GM=roster loads (roster backend selectable)", cfg["gm"] == "roster")
+check("a8s node name defaults to atfl-server", cfg["a8s_node"] == "atfl-server")
+check("a8s node root carried through", cfg["a8s_node_root"] == "/srv/atfl/a8s/atfl-server")
+cfg = load({**BASE, "ATFL_GM": "roster", "ATFL_A8S_NODE_ROOT": "/srv/atfl/a8s/x",
+            "ATFL_A8S_NODE": "game-mailbox"})
+check("ATFL_A8S_NODE override honored", cfg["a8s_node"] == "game-mailbox")
+cfg = load(dict(BASE))
+check("mock GM needs no node root", cfg["a8s_node_root"] is None)
 for bad in ("real", "bogus"):
     err = raises({**BASE, "ATFL_GM": bad})
     check(f"ATFL_GM={bad} refused", err is not None)
-check("ATFL_GM case/space tolerant", load({**BASE, "ATFL_GM": " Roster "})["gm"] == "roster")
+check("ATFL_GM case/space tolerant",
+      load({**BASE, "ATFL_GM": " Roster ",
+            "ATFL_A8S_NODE_ROOT": "/x"})["gm"] == "roster")
 
 # --- 4. image-mode gate (open question #6) ---
 err = raises({**BASE, "ATFL_IMAGES": "real"})

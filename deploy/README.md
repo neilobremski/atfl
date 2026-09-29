@@ -27,6 +27,15 @@ sudo /srv/atfl/venv/bin/pip install -r /srv/atfl/atfl/deploy/requirements.txt
 sudo chown -R atfl:atfl /srv/atfl /var/lib/atfl
 ```
 
+Register the game server's mailbox-only a8s node (one-time; keeper
+replies return to this node's mailbox, and RosterGM sends from its
+root — see `server/gm.py` start-send-stop):
+
+```bash
+sudo -u atfl mkdir -p /srv/atfl/a8s/atfl-server
+sudo -u atfl a8s add atfl-server /srv/atfl/a8s/atfl-server
+```
+
 Then `/etc/atfl/atfl.env` (600, `root:atfl`):
 
 ```
@@ -36,6 +45,11 @@ ATFL_TURN_LEN_MIN=60
 ATFL_GM=mock
 ATFL_GAMES_DIR=/var/lib/atfl/games
 ATFL_TOKEN_PATH=/etc/atfl/token.json
+# Roster backend (flip ATFL_GM to roster only for the dry run):
+# the mailbox node RosterGM sends from. ATFL_A8S_NODE_ROOT is REQUIRED
+# when ATFL_GM=roster (startup refuses without it); unused for mock.
+ATFL_A8S_NODE=atfl-server
+ATFL_A8S_NODE_ROOT=/srv/atfl/a8s/atfl-server
 # Phase 3 images (composite per turn email): off | stub | real.
 # 'stub' wires deterministic placeholder panels (dev); 'real' needs the
 # key (OQ#6) and refuses to start without it.

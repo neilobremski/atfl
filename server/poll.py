@@ -64,7 +64,9 @@ def run_once(gmail, gm, cfg):
 def build_clients(cfg):
     """gm per ATFL_GM (mock default; RosterGM for 'roster') and the Gmail
     client (real adapter once the token exists). Called once at startup."""
-    gm = RosterGM() if cfg["gm"] == "roster" else MockGM()
+    gm = (RosterGM(node_name=cfg["a8s_node"],
+                   node_root=cfg["a8s_node_root"])
+          if cfg["gm"] == "roster" else MockGM())
     service = build_service(cfg["token_path"])  # raises until OQ#1 closes
     gmail = GoogleApiGmail(messages_resource(service))
     return gmail, gm

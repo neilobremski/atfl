@@ -46,7 +46,8 @@ log = logging.getLogger("atfl.dry_run")
 
 def _build_gm(cfg):
     if cfg["gm"] == "roster":
-        return RosterGM()
+        return RosterGM(node_name=cfg["a8s_node"],
+                        node_root=cfg["a8s_node_root"])
     return MockGM()
 
 

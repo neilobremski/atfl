@@ -28,24 +28,26 @@ opencode works with no login on the free path (verified 2026-09-28).
       (Memory, 2026-09-28: Tailscale plan gives SSH once Neil runs the
       one-time Mac-side install; without it there is no terminal path to
       the VM).
-- [ ] **Transport rework done** (session #34, hardened #36): `RosterGM`
-      sends `a8s tell fogline-gm '<envelope>'` and polls the game server's
-      own a8s mailbox (`atfl-server`, mailbox-only node) for keeper's reply
-      (`a8s convo fogline-gm --from fogline-gm:keeper --json`, sender+
-      timestamp matched in Python), up to a 30-min reply wait (roster wake
-      latency is minutes-scale; the `r4t idle` dreaming pass can hold the
-      single wake slot 15+ min). **Start-send-stop:** the S3 publish is done
-      by the node's running daemon, so a never-started node never delivers
-      (proven 2026-09-29) — the server must `a8s start atfl-server`, send,
-      then `a8s stop atfl-server` before polling (a running daemon would
-      consume the reply before the poll sees it). The `compose_narrative`
-      envelope carries the approved adjudication array (fresh a8s threads
-      per tell — keeper can't see the earlier tell). Node root goes in
-      `RosterGM(node_root=...)`; send/poll halves are injectable for
-      hermetic tests. The `a8s` binary is resolved by `server/gm.py`
-      `_a8s_bin()` (ATFL_A8S_BIN → PATH → ~/.ar3/a8s) — no PATH export
-      needed for the binary itself, but `a8s start/stop` needs the same
-      resolution in the game server's environment.
+- [ ] **Start-send-stop is code-enforced** (session #40; was operator
+      procedure before): `RosterGM._send_real` starts the `atfl-server`
+      node, sends the tell from `node_root`, then stops the node in a
+      finally before the reply poll — because `a8s tell` only *records*
+      the outbox file (the S3 publish is the running daemon's job) and a
+      running daemon consumes inbound before `a8s convo` sees it (both
+      proven 2026-09-29). Start/tell/stop failures each raise TurnFailed
+      loudly; a missing `node_root` fails before any subprocess runs.
+      `node_name`/`node_root` come from `ATFL_A8S_NODE` /
+      `ATFL_A8S_NODE_ROOT` in `/etc/atfl/atfl.env` (startup refuses a
+      roster backend without the root). The `a8s` binary is resolved by
+      `server/gm.py` `_a8s_bin()` (ATFL_A8S_BIN → PATH → ~/.ar3/a8s) for
+      all three verbs — no PATH export needed. Pinned hermetically
+      (`prototype/roster_demo.py` §12, 16 checks). The `fogline-gm`
+      roster node itself must be started on the VM (and on boot) —
+      tells are only processed while it runs (verified 2026-09-28) —
+      with the opencode rig under the `atfl` user and `opencode` on the
+      r4t worker PATH (Memory, 2026-09-28: Tailscale plan gives SSH once
+      Neil runs the one-time Mac-side install; without it there is no
+      terminal path to the VM).
 - [ ] Repo green locally: all `prototype/*_demo.py` pass, `poll --fake` smoke
       clean. RosterGM behavior is pinned hermetically
       (`prototype/roster_demo.py`, 53 checks).
@@ -65,7 +67,9 @@ opencode works with no login on the free path (verified 2026-09-28).
 
 ## 2. Point the rig at the roster, run the dry game
 
-1. Set `ATFL_GM=roster` in `/etc/atfl/atfl.env`. Restart the unit.
+1. Set `ATFL_GM=roster` in `/etc/atfl/atfl.env` (with `ATFL_A8S_NODE`
+   / `ATFL_A8S_NODE_ROOT` from the README — startup refuses without the
+   root). Restart the unit.
 2. Dry-run the two-turn scratch game in-process, no email needed:
    `python -m server.dry_run --email <operator-own-address>`. It plays
    turns 1+2 through real dispatch, then reports outcome actions, ledger

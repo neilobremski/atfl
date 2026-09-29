@@ -245,10 +245,20 @@ class RosterGM(GameMaster):
     correlated by send time since the server runs serial turns).
 
     Production shape: the game server's tells go out from its own
-    mailbox-only a8s node (e.g. `atfl-server`), registered but never
-    started — a running daemon would consume inbound before `a8s tells`
-    sees them. `node_root` is that node's root directory (the cwd `a8s
-    tells` must run from).
+    mailbox-only a8s node (default `atfl-server`; `node_name` + `node_root`
+    come from config — see ATFL_A8S_NODE / ATFL_A8S_NODE_ROOT). `node_root`
+    is that node's root directory (the cwd `a8s tell` must run from —
+    keeper replies to the inbound sender, so a tell sent from any other
+    node strands the reply).
+
+    Start-send-stop is enforced in code, not left to operator procedure
+    (the publish mechanism was found live 2026-09-29): `_send_real`
+    starts the node (a never-started node's `tell` only records the
+    outbox file — the S3 publish is the running daemon's job), sends,
+    then stops the node in a finally before the reply poll (a running
+    daemon consumes inbound before `a8s convo` sees it). A missing or
+    non-directory `node_root` fails loudly in `_send_real` before any
+    subprocess runs — never silently sends from the caller's cwd.
 
     When the reply wait exhausts with no keeper reply, one `reprompt`
     envelope goes out (the original envelope verbatim, with
@@ -269,6 +279,7 @@ class RosterGM(GameMaster):
                  poll_interval_s=POLL_INTERVAL_S,
                  reprompt_wait_s=REPROMPT_WAIT_S,
                  max_narrative_words=MAX_NARRATIVE_WORDS,
+                 node_name="atfl-server",
                  node_root=None,
                  keeper_sender=KEEPER_SENDER,
                  send_fn=None, poll_fn=None):
@@ -277,6 +288,7 @@ class RosterGM(GameMaster):
         self.poll_interval_s = poll_interval_s
         self.reprompt_wait_s = reprompt_wait_s
         self.max_narrative_words = max_narrative_words
+        self.node_name = node_name
         self.node_root = node_root
         self.keeper_sender = keeper_sender
         # send_fn(envelope_json) -> None; poll_fn(timeout_s, since_iso)
@@ -286,27 +298,59 @@ class RosterGM(GameMaster):
         self.poll_fn = poll_fn or self._poll_real
 
     def _send_real(self, envelope_json):
-        """Publish the envelope to the roster. NOTE (found live 2026-09-29):
-        `a8s tell` only *records* the outbox file — the S3 publish is done
-        by the node's running daemon. A registered-but-never-started node
-        (the atfl-server mailbox shape) will NOT deliver tells. The game
-        server must start the node, send, then stop it before polling for
-        the reply (a running daemon would consume the reply before the
-        poll sees it)."""
-        node_cwd = (self.node_root if self.node_root
-                    and os.path.isdir(self.node_root) else None)
-        # Outbound MUST go from the node whose mailbox the poll watches:
-        # keeper replies to the inbound sender, so a tell sent from any
-        # other node would strand the reply in that node's mailbox.
-        try:
-            proc = subprocess.run(
-                [_a8s_bin(), "tell", self.roster_name, envelope_json],
-                capture_output=True, text=True, timeout=60, cwd=node_cwd)
-        except subprocess.TimeoutExpired:
-            _turn_failed("a8s tell did not return within 60s")
-        if proc.returncode != 0:
+        """Publish the envelope to the roster via the game server's own
+        mailbox node, start-send-stop (found live 2026-09-29): `a8s tell`
+        only *records* the outbox file — the S3 publish is done by the
+        node's running daemon, so the node is started first; it is
+        stopped again in a finally before the reply poll, because a
+        running daemon consumes inbound before `a8s convo` sees it.
+        Outbound MUST go from node_root (keeper replies to the inbound
+        sender) — a missing node_root fails loudly here, before any
+        subprocess runs, instead of silently sending from the caller's
+        cwd and stranding the reply."""
+        if not self.node_root or not os.path.isdir(self.node_root):
             _turn_failed(
-                f"a8s tell exited {proc.returncode}: {proc.stderr.strip()[:200]}")
+                "RosterGM node_root is not set — register the game "
+                "server's mailbox-only a8s node (e.g. atfl-server) and "
+                "point RosterGM at its root directory")
+        a8s = _a8s_bin()
+        try:
+            start = subprocess.run(
+                [a8s, "start", self.node_name],
+                capture_output=True, text=True, timeout=60)
+            if start.returncode != 0:
+                _turn_failed(f"a8s start {self.node_name} exited "
+                             f"{start.returncode}: "
+                             f"{start.stderr.strip()[:200]}")
+            try:
+                proc = subprocess.run(
+                    [a8s, "tell", self.roster_name, envelope_json],
+                    capture_output=True, text=True, timeout=60,
+                    cwd=self.node_root)
+            finally:
+                # Stop failure is loud, not best-effort: a daemon left
+                # running races the reply poll and would silently starve
+                # the call (the whole reply_wait_s + re-prompt burn).
+                try:
+                    stop = subprocess.run(
+                        [a8s, "stop", self.node_name],
+                        capture_output=True, text=True, timeout=660)
+                except subprocess.TimeoutExpired:
+                    _turn_failed(
+                        f"a8s stop {self.node_name} did not return within "
+                        "660s — the reply poll would race a live daemon")
+                if stop.returncode != 0:
+                    _turn_failed(
+                        f"a8s stop {self.node_name} exited "
+                        f"{stop.returncode}: "
+                        f"{stop.stderr.strip()[:200]} — the reply poll "
+                        "would race a live daemon")
+            if proc.returncode != 0:
+                _turn_failed(
+                    f"a8s tell exited {proc.returncode}: "
+                    f"{proc.stderr.strip()[:200]}")
+        except subprocess.TimeoutExpired:
+            _turn_failed("a8s send sequence did not return within 60s")
 
     def _poll_real(self, timeout_s, since_iso):
         """One poll arm on the game server's mailbox node; returns the first

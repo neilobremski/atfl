@@ -18,6 +18,14 @@ the free-micro-1 layout; override with env vars locally.
                         R4T fogline-gm roster through server/gm.py RosterGM;
                         needs the roster live on the host (phase 4). Values
                         other than 'mock'/'roster' raise.
+    ATFL_A8S_NODE       a8s node name the game server sends from (default
+                        atfl-server). Unused for 'mock'.
+    ATFL_A8S_NODE_ROOT  root directory of that a8s node on the host
+                        (where `a8s tell` must run from — keeper replies to
+                        the inbound sender). REQUIRED when ATFL_GM=roster:
+                        startup refuses without it so a miswired roster
+                        backend fails at boot, not mid-turn. Unused for
+                        'mock'.
     ATFL_IMAGES         'off' (default), 'stub' or 'real'. 'stub' wires the
                         deterministic placeholder provider into turn emails;
                         'real' raises until the image API key exists (open
@@ -39,6 +47,13 @@ def load(env=os.environ):
         raise ConfigError(f"ATFL_GM must be 'mock' or 'roster', got {gm!r}")
     # 'roster' needs the fogline-gm roster on the host (phase4 doc);
     # the RosterGM adapter fails loudly at call time if it is missing.
+    node_root = env.get("ATFL_A8S_NODE_ROOT", "").strip() or None
+    if gm == "roster" and not node_root:
+        raise ConfigError(
+            "ATFL_GM=roster needs ATFL_A8S_NODE_ROOT set — the game "
+            "server's mailbox-only a8s node root (e.g. the directory "
+            "from `a8s add atfl-server <root>`). Refusing to start "
+            "half-wired.")
 
     address = env.get("ATFL_GAME_ADDRESS", "").strip()
     if not address:
@@ -77,6 +92,9 @@ def load(env=os.environ):
         "poll_min": poll_min,
         "turn_len_min": turn_len_min,
         "gm": gm,
+        "a8s_node": env.get("ATFL_A8S_NODE", "atfl-server").strip()
+        or "atfl-server",
+        "a8s_node_root": node_root,
         "images_mode": images_mode,
         "image_api_key": image_api_key,
     }

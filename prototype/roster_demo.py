@@ -7,7 +7,8 @@ it — one script fn serves both halves), so no roster, no subprocess, no
 network. All green = the adapter honors the phase4 contract: exact
 envelope schema with no hidden-state leak, strict adjudication
 validation, narrative word cap, pick validation, async send+poll with a
-bounded reply wait plus ONE re-prompt before the loud failure, and every
+bounded reply wait plus ONE re-prompt before the loud failure, the
+start-send-stop publish discipline enforced in code (§12), and every
 roster failure surfacing as a TurnFailed
 so dispatch.py's §2.6 retry-once path covers it.
 
@@ -16,8 +17,10 @@ Run from the repo root: python3 prototype/roster_demo.py
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
+import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -26,6 +29,7 @@ from server.dispatch import dispatch_message
 from server.gm import (ENVELOPE_KEYS, MAX_NARRATIVE_WORDS, RosterGM,
                        build_envelope, game_clock_label)
 from server.turn_loop import TurnFailed
+import server.gm as gm_mod
 
 BASE = {"ATFL_GAME_ADDRESS": "fogline@game.example"}
 
@@ -261,11 +265,22 @@ check("leaked plot concept -> failed outcome, nothing sent", o.action == "failed
 print("\n== 9. config: roster backend selectable, mock stays default ==")
 cfg = config_load(dict(BASE))
 check("default GM backend is mock", cfg["gm"] == "mock")
-cfg = config_load({**BASE, "ATFL_GM": "roster"})
+cfg = config_load({**BASE, "ATFL_GM": "roster",
+                   "ATFL_A8S_NODE_ROOT": "/srv/atfl/a8s/atfl-server"})
 check("ATFL_GM=roster loads", cfg["gm"] == "roster")
+check("roster config carries node name + root",
+      cfg["a8s_node"] == "atfl-server"
+      and cfg["a8s_node_root"] == "/srv/atfl/a8s/atfl-server")
+try:
+    config_load({**BASE, "ATFL_GM": "roster"})  # no node root
+    refused = False
+except ConfigError:
+    refused = True
+check("ATFL_GM=roster without node root refused at startup", refused)
 for bad in ("real", "bogus", "ROSTER "):
     try:
-        config_load({**BASE, "ATFL_GM": bad})
+        config_load({**BASE, "ATFL_GM": bad,
+                     "ATFL_A8S_NODE_ROOT": "/x"})
         refused = False
     except ConfigError:
         refused = True
@@ -376,5 +391,114 @@ gm, _ = gm_script(late_reply_script(), reply_wait_s=0.05,
                   poll_interval_s=0.05, reprompt_wait_s=1)
 check("late original-call reply during re-prompt wait accepted",
       gm.compose_narrative("x", [], {}, "", context={}) == "The fog holds.")
+
+print("\n== 12. start-send-stop: the publish discipline, enforced in code ==")
+# _send_real shells out; hermetically we stub subprocess.run and script
+# each verb's result. node_root must be a real dir (tempfile).
+
+
+class FakeRun:
+    """Stand-in for subprocess.run: records (argv, kwargs); the script
+    returns (rc, stdout, stderr) per call, or raises."""
+    def __init__(self, script):
+        self.calls = []
+        self.script = script
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((list(argv), dict(kwargs)))
+        outcome = self.script(argv, kwargs)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        rc, out, err = outcome
+        return types.SimpleNamespace(returncode=rc, stdout=out, stderr=err)
+
+
+def send_with_stub(gm, script):
+    """Run gm._send_real with a stubbed subprocess; returns (calls, err)
+    where calls is the recorded argv/kwargs list and err is the
+    TurnFailed message or None."""
+    fake = FakeRun(script)
+    stub = types.SimpleNamespace(run=fake,
+                                 TimeoutExpired=subprocess.TimeoutExpired)
+    real = gm_mod.subprocess
+    gm_mod.subprocess = stub
+    try:
+        gm._send_real('{"call":"adjudicate"}')
+        err = None
+    except TurnFailed as e:
+        err = str(e)
+    finally:
+        gm_mod.subprocess = real
+    return fake.calls, err
+
+
+def ok_script(argv, kwargs):
+    return (0, "", "")
+
+
+def fail_verb(verb):
+    def script(argv, kwargs):
+        return (1, "", "boom") if argv[1] == verb else (0, "", "")
+    return script
+
+
+ROOT = tempfile.mkdtemp(prefix="atfl-node-")
+BIN = gm_mod._a8s_bin()
+gm12 = RosterGM(node_root=ROOT)
+calls, err = send_with_stub(gm12, ok_script)
+check("happy path: start, tell, stop in order",
+      [c[0][1] for c in calls] == ["start", "tell", "stop"])
+check("all three verbs use the resolved a8s binary",
+      all(c[0][0] == BIN for c in calls) and BIN)
+check("start/stop name the node, tell names the roster",
+      calls[0][0] == [BIN, "start", "atfl-server"]
+      and calls[1][0] == [BIN, "tell", "fogline-gm", '{"call":"adjudicate"}']
+      and calls[2][0] == [BIN, "stop", "atfl-server"])
+check("tell runs with cwd=node_root", calls[1][1].get("cwd") == ROOT)
+check("happy path sends with no TurnFailed", err is None)
+gm_named = RosterGM(node_name="game-mailbox", node_root=ROOT)
+calls, _ = send_with_stub(gm_named, ok_script)
+check("node_name override respected by start/stop",
+      calls[0][0][2] == "game-mailbox" and calls[2][0][2] == "game-mailbox")
+check("node_name defaults to atfl-server", RosterGM().node_name == "atfl-server")
+calls, err = send_with_stub(gm12, fail_verb("tell"))
+check("tell failure -> TurnFailed naming the tell",
+      err is not None and "a8s tell" in err)
+check("stop still runs when tell fails (finally)",
+      [c[0][1] for c in calls] == ["start", "tell", "stop"])
+calls, err = send_with_stub(gm12, fail_verb("start"))
+check("start failure -> TurnFailed naming the start, no tell, no stop",
+      err is not None and "a8s start" in err
+      and [c[0][1] for c in calls] == ["start"])
+calls, err = send_with_stub(gm12, fail_verb("stop"))
+check("stop failure -> TurnFailed naming the stop (poll would race a daemon)",
+      err is not None and "a8s stop" in err and "daemon" in err
+      and [c[0][1] for c in calls] == ["start", "tell", "stop"])
+calls, err = send_with_stub(
+    gm12, lambda argv, kw: subprocess.TimeoutExpired(argv, 60)
+    if argv[1] == "tell" else (0, "", ""))
+check("tell timeout -> TurnFailed naming the 60s send budget, stop still ran",
+      err is not None and "60s" in err
+      and [c[0][1] for c in calls] == ["start", "tell", "stop"])
+calls, err = send_with_stub(RosterGM(), ok_script)  # node_root unset
+check("missing node_root -> TurnFailed before any subprocess runs",
+      err is not None and "node_root" in err and calls == [])
+calls, err = send_with_stub(
+    RosterGM(node_root=os.path.join(ROOT, "no-such-dir")), ok_script)
+check("nonexistent node_root dir -> TurnFailed before any subprocess runs",
+      err is not None and "node_root" in err and calls == [])
+err = raises_turn_failed(
+    lambda: RosterGM()._poll_real(1, "2026-01-01T00:00:00Z"))
+check("_poll_real without node_root -> TurnFailed (no subprocess)",
+      err is not None and "node_root" in err)
+old_bin = os.environ.get("ATFL_A8S_BIN")
+os.environ["ATFL_A8S_BIN"] = "/bin/true"
+try:
+    check("ATFL_A8S_BIN override respected", gm_mod._a8s_bin() == "/bin/true")
+finally:
+    if old_bin is None:
+        del os.environ["ATFL_A8S_BIN"]
+    else:
+        os.environ["ATFL_A8S_BIN"] = old_bin
 
 print(f"\nroster demo green — {len(checks)} checks, 0 FAILs.")
