@@ -305,11 +305,29 @@ tell; sent to critic for a secrecy read — within charter, but noted).
 
 Design consequences (open, for the charter + RosterGM):
 1. An open inbound call's return leg must outrank self-initiated review —
-   idle-turn review yields when a call thread is pending.
+   idle-turn review yields when a call thread is pending. **DONE 2026-09-29
+   (session #38):** charter amendment "Open calls outrank idle work." in
+   fogline-gm/r4t.md, plus a keeper-role sentence on completing starved
+   return legs with the existing artifact verbatim.
 2. RosterGM needs a re-prompt path when the poll exhausts reply_wait_s
    with no reply (currently a silent timeout); the recovery mechanism
    used here was an operator re-prompt tell instructing keeper to forward
    arbiter's already-produced array verbatim via `tell atfl-server`.
 3. Critic's pre-send review needs a fidelity check (byte-level question
    reproduction) in addition to shape/secrecy — transcription drift was
-   only caught post-delivery this time.
+   only caught post-delivery this time. **DONE 2026-09-29 (session #38):**
+   fidelity added to the critic role in fogline-gm/r4t.md (every `q`
+   reproduces the envelope's question byte-for-byte).
+
+**Recovery protocol — validated live 2026-09-29 (session #38).** Keeper
+answered the operator's recovery tell (sent 06:09 UTC as murph): keeper
+forwarded arbiter's array verbatim via `tell atfl-server`; it landed in
+atfl-server's S3 mailbox 06:55:27 UTC (inbox file
+01M3NZ4STVPXH5M2XQX87AY0G0.json) and was validated server-side against
+the ground-truth record: 6/6 answers and effect keys match, numeric
+effects exact (cold 0.35, water_ml 345). The first full live adjudicate
+round trip (server → roster → arbiter → keeper → server) is complete.
+The recovery tell's form: name the open thread, state the already-produced
+artifact to forward (never reconstruct from notes — the artifact is
+ground truth), send it via `tell atfl-server` (the game server's mailbox
+node, so the reply is pollable server-side), confirm to the operator.
