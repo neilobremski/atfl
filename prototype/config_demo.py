@@ -38,6 +38,7 @@ check("defaults: token path + games dir pinned",
       cfg["token_path"] == "/etc/atfl/token.json"
       and cfg["games_dir"] == "/var/lib/atfl/games")
 check("images off -> api_key None", cfg["image_api_key"] is None)
+check("images off -> hf_token None", cfg["hf_token"] is None)
 
 # --- 2. game address gate (open question #1): never run against the stub ---
 err = raises({})
@@ -75,6 +76,12 @@ check("ATFL_IMAGES=real with key loads", cfg["images_mode"] == "real"
 cfg = load({**BASE, "ATFL_IMAGES": "stub"})
 check("ATFL_IMAGES=stub loads, key None", cfg["images_mode"] == "stub"
       and cfg["image_api_key"] is None)
+err = raises({**BASE, "ATFL_IMAGES": "hf"})
+check("ATFL_IMAGES=hf without token refused", err is not None)
+check("refusal names the HF-token blocker", "ATFL_HF_TOKEN" in err)
+cfg = load({**BASE, "ATFL_IMAGES": "hf", "ATFL_HF_TOKEN": "hf_x"})
+check("ATFL_IMAGES=hf with token loads", cfg["images_mode"] == "hf"
+      and cfg["hf_token"] == "hf_x")
 check("ATFL_IMAGES=bogus refused", raises({**BASE, "ATFL_IMAGES": "bogus"}) is not None)
 check("ATFL_IMAGES case/space tolerant", load({**BASE, "ATFL_IMAGES": " Stub "})["images_mode"] == "stub")
 

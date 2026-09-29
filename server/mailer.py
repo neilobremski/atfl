@@ -423,7 +423,8 @@ def _turn_attachments(games_dir, outcome, images_cfg):
     try:
         from .images import build_provider, build_turn_composite, ImageError
         provider = build_provider(images_cfg.get("mode"),
-                                  images_cfg.get("api_key"))
+                                  api_key=images_cfg.get("api_key"),
+                                  hf_token=images_cfg.get("hf_token"))
         if provider is None:
             return [], None
         comp = build_turn_composite(games_dir, outcome.guid,
@@ -444,7 +445,8 @@ def run_poll_cycle(games_dir, gmail, gm, game_address=GAME_ADDRESS,
                    seen_ids=None, turn_len_min=60, images=None):
     """One full mailer cycle: poll -> dispatch -> send -> mark read.
 
-    images: {"mode": "off"/"stub"/"real", "api_key": ...} or None.
+    images: {"mode": "off"/"stub"/"real"/"hf", "api_key": ...,
+             "hf_token": ...} or None.
     The composite attaches to turn emails only; any image failure is
     noted, never raised (the text-only turn still sends).
 

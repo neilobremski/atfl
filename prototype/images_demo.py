@@ -20,7 +20,9 @@ from PIL import Image
 
 from server import config as _config
 from server.gm import MockGM
-from server.images import (ImageError, GeminiImageProvider, StubImageProvider, build_provider,
+from server.images import (ImageError, GeminiImageProvider, HFImageProvider,
+                           HF_SCENE_MODEL, HF_SELFIE_MODEL,
+                           StubImageProvider, build_provider,
                            build_turn_composite, get_character_ref,
                            scene_prompt, selfie_prompt, stitch_composite,
                            time_of_day_word)
@@ -55,7 +57,7 @@ check("t+1140m (02:00) -> night", time_of_day_word(1140) == "night")
 # --- 2. provider modes: loud refusal, stub available ---
 check("off -> None", build_provider("off") is None)
 check("stub -> provider", isinstance(build_provider("stub"), StubImageProvider))
-for bad in ("real", "bogus"):
+for bad in ("real", "hf", "bogus"):
     try:
         build_provider(bad)
         check(f"mode {bad!r} raises", False)
@@ -67,10 +69,20 @@ try:
 except ImageError:
     check("real+key -> GeminiImageProvider (wired)", False)
 try:
+    hf_provider = build_provider("hf", hf_token="hf_test")
+    check("hf+token -> HFImageProvider", isinstance(hf_provider, HFImageProvider))
+except ImageError:
+    check("hf+token -> HFImageProvider (wired)", False)
+try:
     GeminiImageProvider("")
     check("empty API key raises at construction", False)
 except ImageError:
     check("empty API key raises at construction", True)
+try:
+    HFImageProvider("")
+    check("empty HF token raises at construction", False)
+except ImageError:
+    check("empty HF token raises at construction", True)
 
 # --- 3. stub determinism ---
 stub = StubImageProvider()
@@ -402,5 +414,95 @@ try:
     check("response without image part raises", False)
 except ImageError:
     check("response without image part raises", True)
+
+# --- 13. HF Inference provider REST contract: hermetic, no network ---
+def _hf_ok_transport(seen):
+    def _fn(url, headers, body):
+        seen.append((url, dict(headers), body))
+        return 200, _fake_png(256)  # HF returns raw image bytes
+    return _fn
+
+seen_hf = []
+hp = HFImageProvider("hf_test", request_fn=_hf_ok_transport(seen_hf))
+hscene = hp.generate_scene("mist on the ridge")
+check("hf scene returns image bytes", len(hscene) > 1000)
+check("hf normalizes to JPEG", hscene[:2] == b"\xff\xd8")
+
+hurl, hheaders, hbody = seen_hf[0]
+check("hf request hits the router inference endpoint",
+      hurl == "https://router.huggingface.co/hf-inference/models/"
+             + HF_SCENE_MODEL)
+check("hf token in Bearer header, not URL",
+      hheaders.get("Authorization") == "Bearer hf_test"
+      and "hf_test" not in hurl)
+hpayload = json.loads(hbody)
+check("hf scene body is text inputs",
+      hpayload == {"inputs": "mist on the ridge"})
+check("scene model is FLUX.1-schnell", HF_SCENE_MODEL == "black-forest-labs/FLUX.1-schnell")
+check("selfie model is Kontext-dev", HF_SELFIE_MODEL == "black-forest-labs/FLUX.1-Kontext-dev")
+
+seen_hf2 = []
+hp2 = HFImageProvider("hf_test", request_fn=_hf_ok_transport(seen_hf2))
+href = _fake_png(128)
+hselfie = hp2.generate_selfie("damp hiker selfie", character_ref=href)
+check("hf selfie returns image bytes", len(hselfie) > 1000)
+hurl2, _, hbody2 = seen_hf2[0]
+check("hf selfie hits the selfie model endpoint",
+      hurl2.endswith("/" + HF_SELFIE_MODEL))
+hpayload2 = json.loads(hbody2)
+check("hf selfie body carries prompt + base64 ref",
+      hpayload2["inputs"].startswith("Keep the SAME person as in the reference photo")
+      and _b64.b64decode(hpayload2["image"]) == href)
+
+seen_hf3 = []
+hp3 = HFImageProvider("hf_test", request_fn=_hf_ok_transport(seen_hf3))
+hp3.generate_selfie("no ref available", character_ref=b"")
+hpayload3 = json.loads(seen_hf3[0][2])
+check("hf no-ref selfie is text inputs only",
+      set(hpayload3.keys()) == {"inputs"})
+
+hcalls = {"n": 0}
+def _hf_loading_then_ok(url, headers, body):
+    hcalls["n"] += 1
+    if hcalls["n"] == 1:
+        return 503, b'{"error": "Model black-forest-labs/FLUX.1-schnell is currently loading"}'
+    return 200, _fake_png(256)
+hp4 = HFImageProvider("hf_test", request_fn=_hf_loading_then_ok)
+check("hf 503-loading retries once then succeeds",
+      len(hp4.generate_scene("x")) > 1000 and hcalls["n"] == 2)
+
+hcalls5 = {"n": 0}
+def _hf_loading_forever(url, headers, body):
+    hcalls5["n"] += 1
+    return 503, b'{"error": "Model is currently loading"}'
+try:
+    HFImageProvider("hf_test", request_fn=_hf_loading_forever).generate_scene("x")
+    check("hf 503 twice raises ImageError", False)
+except ImageError as e:
+    check("hf 503 twice raises ImageError", hcalls5["n"] == 2 and "503" in str(e))
+
+def _hf_limited(url, headers, body):
+    return 429, b'{"error": "Rate limit reached"}'
+try:
+    HFImageProvider("hf_test", request_fn=_hf_limited).generate_scene("x")
+    check("hf 429 raises without retry", False)
+except ImageError as e:
+    check("hf 429 raises without retry", "429" in str(e))
+
+def _hf_flaky(url, headers, body):
+    raise _uerr.URLError("reset")
+try:
+    HFImageProvider("hf_test", request_fn=_hf_flaky).generate_scene("x")
+    check("hf double transport failure raises", False)
+except ImageError:
+    check("hf double transport failure raises", True)
+
+def _hf_not_image(url, headers, body):
+    return 200, b'not-an-image-at-all'
+try:
+    HFImageProvider("hf_test", request_fn=_hf_not_image).generate_scene("x")
+    check("hf non-image payload raises", False)
+except ImageError:
+    check("hf non-image payload raises", True)
 
 print("\nimages demo: all green")

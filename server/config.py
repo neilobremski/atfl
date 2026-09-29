@@ -26,12 +26,17 @@ the free-micro-1 layout; override with env vars locally.
                         startup refuses without it so a miswired roster
                         backend fails at boot, not mid-turn. Unused for
                         'mock'.
-    ATFL_IMAGES         'off' (default), 'stub' or 'real'. 'stub' wires the
+    ATFL_IMAGES         'off' (default), 'stub', 'real' or 'hf'. 'stub' wires the
                         deterministic placeholder provider into turn emails;
                         'real' raises until the image API key exists (open
-                        question #6).
-    ATFL_IMAGE_API_KEY  key for the real image provider. Not set until
-                        open question #6 closes.
+                        question #6); 'hf' raises until ATFL_HF_TOKEN exists —
+                        the no-cost HuggingFace Inference path (recommended,
+                        research/phase3-hf-colab-art.md).
+    ATFL_IMAGE_API_KEY  key for the real (Gemini) image provider. Not set until
+                        open question #6 closes. Deprioritized 2026-09-29:
+                        Neil ruled out paid image APIs.
+    ATFL_HF_TOKEN       free HuggingFace token with the 'inference' scope.
+                        New one-time ask for the no-cost image path.
 """
 import os
 
@@ -76,14 +81,21 @@ def load(env=os.environ):
         raise ConfigError("ATFL_TURN_LEN_MIN must be a positive integer (minutes).")
 
     images_mode = env.get("ATFL_IMAGES", "off").strip().lower()
-    if images_mode not in ("off", "stub", "real"):
+    if images_mode not in ("off", "stub", "real", "hf"):
         raise ConfigError(
-            f"ATFL_IMAGES must be 'off', 'stub' or 'real', got {images_mode!r}")
+            f"ATFL_IMAGES must be 'off', 'stub', 'real' or 'hf', "
+            f"got {images_mode!r}")
     image_api_key = env.get("ATFL_IMAGE_API_KEY", "").strip() or None
     if images_mode == "real" and not image_api_key:
         raise ConfigError(
             "ATFL_IMAGES=real needs ATFL_IMAGE_API_KEY set — the image key "
             "is still open question #6. Refusing to start half-wired.")
+    hf_token = env.get("ATFL_HF_TOKEN", "").strip() or None
+    if images_mode == "hf" and not hf_token:
+        raise ConfigError(
+            "ATFL_IMAGES=hf needs ATFL_HF_TOKEN set — the free HuggingFace "
+            "token with the 'inference' scope (research/phase3-hf-colab-"
+            "art.md). Refusing to start half-wired.")
 
     return {
         "games_dir": env.get("ATFL_GAMES_DIR", DEFAULT_GAMES_DIR),
@@ -97,6 +109,7 @@ def load(env=os.environ):
         "a8s_node_root": node_root,
         "images_mode": images_mode,
         "image_api_key": image_api_key,
+        "hf_token": hf_token,
     }
 
 

@@ -176,9 +176,13 @@ class StubImageProvider:
                                   bg=(56, 44, 38))
 
 
-def build_provider(mode: str, api_key: str | None = None) -> ImageProvider:
-    """'off'/'stub'/'real' from config. 'real' refuses loudly until the
-    API key exists — no silent stub generation against a live account."""
+def build_provider(mode: str, api_key: str | None = None,
+                   hf_token: str | None = None) -> ImageProvider:
+    """'off'/'stub'/'real'/'hf' from config. 'real'/'hf' refuse loudly
+    until their key exists — no silent stub generation against a live
+    account. 'real' is the paid Gemini direction (deprioritized per
+    2026-09-29 — Neil ruled out paid image APIs); 'hf' is the no-cost
+    HuggingFace Inference path (research/phase3-hf-colab-art.md)."""
     mode = (mode or "off").strip().lower()
     if mode == "off":
         return None
@@ -190,7 +194,16 @@ def build_provider(mode: str, api_key: str | None = None) -> ImageProvider:
                 "ATFL_IMAGES=real needs the image API key provisioned "
                 "(open question #6); refusing to run without it.")
         return GeminiImageProvider(api_key)
-    raise ImageError(f"ATFL_IMAGES must be 'off', 'stub' or 'real', got {mode!r}")
+    if mode == "hf":
+        if not hf_token:
+            raise ImageError(
+                "ATFL_IMAGES=hf needs ATFL_HF_TOKEN set — a free "
+                "HuggingFace token with the 'inference' scope "
+                "(research/phase3-hf-colab-art.md); refusing to run "
+                "without it.")
+        return HFImageProvider(hf_token)
+    raise ImageError(f"ATFL_IMAGES must be 'off', 'stub', 'real' or 'hf', "
+                     f"got {mode!r}")
 
 
 # -- Gemini REST provider --------------------------------------------------------
@@ -346,6 +359,137 @@ class GeminiImageProvider:
             except Exception as e:
                 raise ImageError(
                     f"gemini image payload not decodable: {e}") from e
+        raise last
+
+
+# -- HuggingFace Inference provider ---------------------------------------------
+
+# Model IDs pinned at the research decision (phase3-hf-colab-art.md).
+# Same churn caveat as the Gemini IDs: these move fast; a swap is a
+# constructor-arg / config-layer change, and no demo pins model behavior.
+HF_SCENE_MODEL = "black-forest-labs/FLUX.1-schnell"
+HF_SELFIE_MODEL = "black-forest-labs/FLUX.1-Kontext-dev"
+HF_INFERENCE_BASE = ("https://router.huggingface.co/hf-inference/"
+                     "models/{model}")
+
+# Kontext-dev repo access on HF requires accepting its license conditions
+# (one-time account action on whoever holds the token). If that blocks,
+# fall back to generic image-to-image via the scene model or the Colab
+# notebook path — see phase3-hf-colab-art.md.
+
+
+class HFImageProvider:
+    """Real backend: HuggingFace Inference, no-cost tier.
+
+    - stdlib-only (urllib) — no new deploy dependency, same as the
+      Gemini adapter.
+    - The HF token travels in the `Authorization: Bearer` header, never
+      in the URL (can't leak through access logs / the sandbox proxy's
+      request line).
+    - Failure policy (established contract): 60s timeout + one retry on
+      transport failures and on 503 (serverless models load on demand —
+      the classic "Model is currently loading" 503). 429 is NOT retried:
+      images never fail a turn, rate-limiting degrades to text-only
+      immediately. Any other non-200 surfaces loudly as ImageError.
+    - Scene = text-to-image via HF_SCENE_MODEL. Selfie = the selfie
+      model with the character ref (the stored first-selfie JPEG)
+      passed as a base64 image alongside the instruction — Kontext-dev
+      is an instruction-based editing model, so the ref keeps subject
+      identity consistent across turns with no finetuning.
+    - `request_fn(url, headers, body_bytes) -> (status, raw_bytes)` is
+      injectable so the demo pins the REST contract without network.
+    - LIVE CHECK OWED: the exact provider-side JSON shape for Kontext-dev
+      on the free inference tier must be verified against the real
+      endpoint once the token exists (research/phase3-hf-colab-art.md).
+      The contract below is pinned hermetically; correct it live if the
+      provider disagrees. Do NOT call it without the token.
+    """
+
+    def __init__(self, hf_token, *, scene_model=HF_SCENE_MODEL,
+                 selfie_model=HF_SELFIE_MODEL, timeout=60,
+                 request_fn=None):
+        if not hf_token:
+            raise ImageError(
+                "HFImageProvider needs a HuggingFace token with the "
+                "'inference' scope (ATFL_HF_TOKEN); refusing to construct "
+                "without one.")
+        self._hf_token = hf_token
+        self._scene_model = scene_model
+        self._selfie_model = selfie_model
+        self._timeout = timeout
+        self._request_fn = request_fn or self._urllib_post
+
+    # -- ImageProvider protocol --
+
+    def generate_scene(self, prompt: str, *, size: int = 1024) -> bytes:
+        return self._generate(self._scene_model,
+                              {"inputs": prompt}, size=size)
+
+    def generate_selfie(self, prompt: str, *, character_ref: bytes,
+                        size: int = 1024) -> bytes:
+        instruction = ("Keep the SAME person as in the reference photo "
+                       "(same face, same hiker, same look); " + prompt)
+        if character_ref:
+            # Instruction-based editing call: ref image + instruction.
+            # Shape pinned hermetically; verify live once the token
+            # exists (see class docstring).
+            body = {"inputs": instruction,
+                    "image": base64.b64encode(character_ref).decode()}
+        else:
+            # No ref stored yet (first selfie): plain text-to-image.
+            body = {"inputs": instruction}
+        return self._generate(self._selfie_model, body, size=size)
+
+    # -- REST plumbing --
+
+    def _urllib_post(self, url, headers, body):
+        req = urllib.request.Request(url, data=body, headers=headers,
+                                     method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
+
+    def _generate(self, model: str, payload: dict, *, size: int) -> bytes:
+        url = HF_INFERENCE_BASE.format(model=model)
+        headers = {"Content-Type": "application/json",
+                   "Authorization": f"Bearer {self._hf_token}"}
+        body = json.dumps(payload).encode()
+
+        last = None
+        for attempt in (1, 2):
+            try:
+                status, raw = self._request_fn(url, headers, body)
+            except (urllib.error.URLError, socket.timeout, TimeoutError,
+                    OSError) as e:
+                last = ImageError(
+                    f"hf transport failed (attempt {attempt}/2): {e}")
+                continue  # one retry on transport failure
+            if status == 429:
+                # Rate limit: do NOT retry — degrade to text-only
+                # immediately (failure policy, images.py docstring).
+                raise ImageError(
+                    "hf rate-limited (429); no retry this turn — "
+                    "text-only turn goes out.")
+            if status == 503:
+                # Serverless cold start ("Model is currently loading"):
+                # one retry, then degrade. Treated like a 5xx.
+                last = ImageError(
+                    f"hf model loading (503, attempt {attempt}/2)")
+                continue
+            if 500 <= status < 600:
+                last = ImageError(
+                    f"hf server error {status} (attempt {attempt}/2)")
+                continue  # one retry on 5xx
+            if status != 200:
+                raise ImageError(
+                    f"hf rejected the request ({status}): {raw[:200]!r}")
+            try:
+                return _to_jpeg(raw)
+            except Exception as e:
+                raise ImageError(
+                    f"hf image payload not decodable: {e}") from e
         raise last
 
 
