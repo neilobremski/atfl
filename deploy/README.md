@@ -16,7 +16,29 @@ the games dir (game SQLite files + mailer.db).
 | `/etc/atfl/token.json` | authorized_user OAuth JSON for the game's Gmail account (0600, `atfl:atfl`) |
 | `/etc/systemd/system/atfl.service` | the unit (this dir's `atfl.service`) |
 
-## One-time setup (as opc/root)
+## One-time setup (as opc, over SSH)
+
+Idempotent script — safe to re-run; never clobbers an existing
+`/etc/atfl/atfl.env` and never force-pulls:
+
+```bash
+scp deploy/bootstrap-free-micro-1.sh opc@free-micro-1:
+ssh opc@free-micro-1 './bootstrap-free-micro-1.sh --charter ~/r4t.md'
+```
+
+What it does: creates the `atfl` user, clones the repo, builds the venv,
+fails loudly if `a8s`/`r4t`/`opencode` are missing on the atfl user's PATH
+(install those first — the roster's r4t workers need all three), registers
+the `atfl-server` a8s node, installs the fogline-gm charter to
+`/srv/atfl/ar3/fogline-gm/r4t.md` (only with `--charter`; skipped
+otherwise, never overwritten without `--update-charter`), writes a
+mock-default `/etc/atfl/atfl.env` only if missing, then installs the unit
+after a clean `systemd-analyze verify` and enables it. `--dry-run` prints
+every planned action without writing anything; all paths are overridable
+via `ATFL_HOME`/`GAMES_DIR`/`ETC_DIR`/`UNIT_DIR` env vars (see
+`deploy/bootstrap_test.sh`, 20 checks, for the pinned invariants).
+
+Manual equivalent of the same steps (kept for reference):
 
 ```bash
 sudo useradd -r -m -d /srv/atfl -s /usr/sbin/nologin atfl
