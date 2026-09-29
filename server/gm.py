@@ -24,6 +24,23 @@ PLOT_ROSTER = [
 DEMO_PLOT_PICK = "earth-changing"  # default until Neil calls the mystery
 
 
+def _a8s_bin():
+    """Locate the a8s binary: explicit ATFL_A8S_BIN env, then PATH, then
+    the operator's ~/.ar3/a8s (this box's install, not on PATH in worker
+    shells — found live 2026-09-28 when the bare lookup would have
+    TurnFailed'd a real RosterGM call). Loud failure when none exists."""
+    explicit = os.environ.get("ATFL_A8S_BIN")
+    if explicit and os.path.isfile(explicit) and os.access(explicit, os.X_OK):
+        return explicit
+    on_path = shutil.which("a8s")
+    if on_path:
+        return on_path
+    home_bin = os.path.expanduser("~/.ar3/a8s")
+    if os.path.isfile(home_bin) and os.access(home_bin, os.X_OK):
+        return home_bin
+    _turn_failed("a8s binary not found — set ATFL_A8S_BIN or put a8s on PATH")
+
+
 class GameMaster:
     """Interface the turn loop drives. All methods receive filtered state
     (no hidden_traits — see turn_loop.gather)."""
@@ -229,12 +246,22 @@ class RosterGM(GameMaster):
         self.poll_fn = poll_fn or self._poll_real
 
     def _send_real(self, envelope_json):
-        if shutil.which("a8s") is None:
-            _turn_failed("a8s binary not found on PATH")
+        """Publish the envelope to the roster. NOTE (found live 2026-09-29):
+        `a8s tell` only *records* the outbox file — the S3 publish is done
+        by the node's running daemon. A registered-but-never-started node
+        (the atfl-server mailbox shape) will NOT deliver tells. The game
+        server must start the node, send, then stop it before polling for
+        the reply (a running daemon would consume the reply before the
+        poll sees it)."""
+        node_cwd = (self.node_root if self.node_root
+                    and os.path.isdir(self.node_root) else None)
+        # Outbound MUST go from the node whose mailbox the poll watches:
+        # keeper replies to the inbound sender, so a tell sent from any
+        # other node would strand the reply in that node's mailbox.
         try:
             proc = subprocess.run(
-                ["a8s", "tell", self.roster_name, envelope_json],
-                capture_output=True, text=True, timeout=60)
+                [_a8s_bin(), "tell", self.roster_name, envelope_json],
+                capture_output=True, text=True, timeout=60, cwd=node_cwd)
         except subprocess.TimeoutExpired:
             _turn_failed("a8s tell did not return within 60s")
         if proc.returncode != 0:
@@ -242,42 +269,54 @@ class RosterGM(GameMaster):
                 f"a8s tell exited {proc.returncode}: {proc.stderr.strip()[:200]}")
 
     def _poll_real(self, timeout_s, since_iso):
-        """One `a8s tells` arm on the game server's mailbox node; returns
-        the first keeper reply seen since since_iso, or None."""
+        """One poll arm on the game server's mailbox node; returns the first
+        keeper reply newer than since_iso, or None.
+
+        Uses `a8s convo <roster> --from <keeper> --json` (verified working
+        live 2026-09-29 — the documented `tells --from`/`--json`/`--since`
+        flags are all rejected or broken in a8s 0.1.97; see _send_real's
+        publish note and the ares bug report). One arm is a fast history
+        read; `_call` re-arms every poll_interval_s until the reply wait
+        deadline. Python-side sender + timestamp filtering is the real
+        correlation — `--from` is belt only."""
         if not self.node_root or not os.path.isdir(self.node_root):
             _turn_failed(
                 "RosterGM node_root is not set — register the game "
                 "server's mailbox-only a8s node (e.g. atfl-server) and "
                 "point RosterGM at its root directory")
         proc = subprocess.run(
-            ["a8s", "tells", "--timeout", str(max(1, int(timeout_s))),
-             "--from", self.keeper_sender, "--since", since_iso,
-             "--body-max", "0", "--line-max", "0"],
+            [_a8s_bin(), "convo", self.roster_name,
+             "--from", self.keeper_sender, "--json", "--limit", "25"],
             capture_output=True, text=True, timeout=timeout_s + 30,
             cwd=self.node_root)
         if proc.returncode != 0:
-            _turn_failed(f"a8s tells exited {proc.returncode}: "
+            _turn_failed(f"a8s convo exited {proc.returncode}: "
                          f"{proc.stderr.strip()[:200]}")
-        return self._parse_tells(proc.stdout)
+        return self._parse_tells(proc.stdout, since_iso)
 
-    @staticmethod
-    def _parse_tells(output):
-        """Pull the first keeper reply body out of `a8s tells` markdown:
-        '### from <sender> to <node> at <ts>' header, blank line, body
-        until the next header or EOF. None when nothing arrived."""
-        lines = output.splitlines()
-        body = None
-        for i, line in enumerate(lines):
-            if body is None:
-                if line.startswith("### from "):
-                    body = []
-            elif line.startswith("### ") or line.startswith("## "):
-                break
-            else:
-                body.append(line)
-        if body is None:
-            return None
-        return "\n".join(body).strip() or None
+    def _parse_tells(self, output, since_iso):
+        """Pull the first keeper reply body out of `a8s convo --json`:
+        newline-delimited {ulid, seq, from, to, utc, content, ...} rows.
+        Accepts the first row sent by keeper *newer* than since_iso (both
+        UTC ISO, zero-padded — string comparison is chronological). None
+        when nothing arrived. Non-JSON lines are ignored."""
+        want = self.keeper_sender.lower()
+        for line in output.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if str(row.get("from", "")).lower() != want:
+                continue
+            if str(row.get("utc", "")) <= since_iso:
+                continue
+            body = (row.get("content") or "").strip()
+            if body:
+                return body
+        return None
 
     def _call(self, call, context, player_input="", questions=None,
               filtered=None, catchup=""):

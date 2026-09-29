@@ -28,17 +28,24 @@ opencode works with no login on the free path (verified 2026-09-28).
       (Memory, 2026-09-28: Tailscale plan gives SSH once Neil runs the
       one-time Mac-side install; without it there is no terminal path to
       the VM).
-- [ ] **Transport rework done** (session #34, implemented): `RosterGM`
-      sends `a8s tell fogline-gm '<envelope>'` and waits on the game
-      server's own a8s mailbox (`atfl-server`, mailbox-only node,
-      registered but never started — a running daemon would consume
-      inbound before `a8s tells` sees them) for keeper's reply, up to a
-      30-min reply wait (roster wake latency is minutes-scale; the
-      `r4t idle` dreaming pass can hold the single wake slot 15+ min).
-      The `compose_narrative` envelope carries the approved adjudication
-      array (fresh a8s threads per tell — keeper can't see the earlier
-      tell). Node root goes in `RosterGM(node_root=...)`; send/poll halves
-      are injectable for hermetic tests.
+- [ ] **Transport rework done** (session #34, hardened #36): `RosterGM`
+      sends `a8s tell fogline-gm '<envelope>'` and polls the game server's
+      own a8s mailbox (`atfl-server`, mailbox-only node) for keeper's reply
+      (`a8s convo fogline-gm --from fogline-gm:keeper --json`, sender+
+      timestamp matched in Python), up to a 30-min reply wait (roster wake
+      latency is minutes-scale; the `r4t idle` dreaming pass can hold the
+      single wake slot 15+ min). **Start-send-stop:** the S3 publish is done
+      by the node's running daemon, so a never-started node never delivers
+      (proven 2026-09-29) — the server must `a8s start atfl-server`, send,
+      then `a8s stop atfl-server` before polling (a running daemon would
+      consume the reply before the poll sees it). The `compose_narrative`
+      envelope carries the approved adjudication array (fresh a8s threads
+      per tell — keeper can't see the earlier tell). Node root goes in
+      `RosterGM(node_root=...)`; send/poll halves are injectable for
+      hermetic tests. The `a8s` binary is resolved by `server/gm.py`
+      `_a8s_bin()` (ATFL_A8S_BIN → PATH → ~/.ar3/a8s) — no PATH export
+      needed for the binary itself, but `a8s start/stop` needs the same
+      resolution in the game server's environment.
 - [ ] Repo green locally: all `prototype/*_demo.py` pass, `poll --fake` smoke
       clean. RosterGM behavior is pinned hermetically
       (`prototype/roster_demo.py`, 53 checks).

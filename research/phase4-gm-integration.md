@@ -244,21 +244,34 @@ design assumptions in this doc:
    implemented — next session's code task, along with the adapter
    rework in (1).
 
-**Implemented 2026-09-28 (work session #34):** corrections (1) and (4)
-are now code in `server/gm.py`. `RosterGM` sends with `a8s tell <roster>
-'<envelope>'` (`_send_real`) and waits on the game server's own a8s
-mailbox via repeated `a8s tells --timeout` arms (`_poll_real`, parsed by
-`_parse_tells`), up to `reply_wait_s` (default 1800s — correction 5's
-tens-of-minutes guidance). Both halves are injectable (`send_fn` /
-`poll_fn`); the hermetic suite `prototype/roster_demo.py` (53 checks)
-covers the new paths: bounded reply wait → TurnFailed on timeout,
-poll-side blowup → TurnFailed, and the `adjudication` envelope key
+**Implemented 2026-09-28 (work session #34, hardened #36):** corrections
+(1) and (4) are now code in `server/gm.py`. `RosterGM` sends with `a8s tell
+<roster> '<envelope>'` (`_send_real`) and waits on the game server's own a8s
+mailbox via repeated poll arms (`_poll_real` + `_parse_tells`), up to
+`reply_wait_s` (default 1800s — correction 5's tens-of-minutes guidance).
+Session #36 fixes: `_a8s_bin()` resolves the a8s binary (ATFL_A8S_BIN →
+PATH → ~/.ar3/a8s) instead of assuming it on PATH; `_send_real` runs with
+cwd=node_root (keeper replies to the inbound sender, so the tell must go
+out from the mailbox node the poll watches); outbound S3 publish is done
+by the node's running daemon, so the production shape is start → send →
+stop → poll (a registered-but-never-started node records the outbox but
+never publishes — proven live 2026-09-29); `_poll_real` uses `a8s convo
+<roster> --from <keeper> --json --limit 25` because `tells --from`/
+`--json`/`--since <ISO>` are all broken in a8s 0.1.97 (reported to ares),
+with Python-side sender+timestamp correlation as the real reply matching.
+Both halves are injectable
+(`send_fn` / `poll_fn`); the hermetic suite `prototype/roster_demo.py`
+(53 checks) covers the new paths: bounded reply wait → TurnFailed on
+timeout, poll-side blowup → TurnFailed, and the `adjudication` envelope key
 present on compose_narrative calls, empty elsewhere. Production shape
 pinned: tells go out from a dedicated mailbox-only a8s node
-(e.g. `atfl-server`) that is registered but *never started* — a running
-daemon would consume inbound before `a8s tells` sees them; the node root
-goes in `RosterGM(node_root=...)`. `dry_run.py --roster` keeps its loud
-offline failure (now "a8s binary not found on PATH" when a8s is absent).
+(`atfl-server`, registered 2026-09-28) that is started only around sends
+(the S3 publish is done by the running daemon — a never-started node never
+publishes) and stopped before polling — a running daemon would consume the
+reply before the poll sees it; the node root goes in
+`RosterGM(node_root=...)`. `dry_run.py --roster` keeps its loud
+offline failure (now "a8s binary not found — set ATFL_A8S_BIN or put a8s on
+PATH" when a8s is absent).
 5. **Wake latency is minutes-scale and the idle pass holds the single
    wake slot.** Observed: 4.5 min from receipt to wake once; the second
    time, a `r4t idle` dreaming/distillation pass (k7e distill of keeper's
