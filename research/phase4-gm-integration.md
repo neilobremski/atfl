@@ -152,9 +152,16 @@ bloat/stalls over a month of play. Mitigations, in order:
 `server/gm.py` (behind the `GameMaster` interface, `context` kwarg for
 envelope metadata), `prototype/roster_demo.py` pins the envelope schema
 and the malformed-output path (42 checks, hermetic — scripted
-`tell_fn`, no roster needed). `config.py` takes `ATFL_GM=mock|roster`
+transport, no roster needed). `config.py` takes `ATFL_GM=mock|roster`
 (mock default; 'real' retired). Waiting on item 2 (the roster itself)
 before any live flip.
+
+**2026-09-28 (work session #34) — transport reworked to async:** the
+`r4t tell`-stdout assumption from session #27 was wrong (see corrections
+below). `RosterGM` is now send (`a8s tell`) + mailbox-poll (`a8s tells`
+arms up to a 30-min reply wait), with injectable `send_fn`/`poll_fn`;
+demo suite at 53 checks. Production sends come from a dedicated
+mailbox-only a8s node (e.g. `atfl-server`), registered but never started.
 
 1. **Now (code-free):** this doc. Nothing to build until the roster exists.
 2. **~~After Neil's one-time OpenCode sign-in~~ (retired 2026-09-28 — opencode
@@ -236,6 +243,22 @@ design assumptions in this doc:
    next to the fixed set; charter updated to name it). Not yet
    implemented — next session's code task, along with the adapter
    rework in (1).
+
+**Implemented 2026-09-28 (work session #34):** corrections (1) and (4)
+are now code in `server/gm.py`. `RosterGM` sends with `a8s tell <roster>
+'<envelope>'` (`_send_real`) and waits on the game server's own a8s
+mailbox via repeated `a8s tells --timeout` arms (`_poll_real`, parsed by
+`_parse_tells`), up to `reply_wait_s` (default 1800s — correction 5's
+tens-of-minutes guidance). Both halves are injectable (`send_fn` /
+`poll_fn`); the hermetic suite `prototype/roster_demo.py` (53 checks)
+covers the new paths: bounded reply wait → TurnFailed on timeout,
+poll-side blowup → TurnFailed, and the `adjudication` envelope key
+present on compose_narrative calls, empty elsewhere. Production shape
+pinned: tells go out from a dedicated mailbox-only a8s node
+(e.g. `atfl-server`) that is registered but *never started* — a running
+daemon would consume inbound before `a8s tells` sees them; the node root
+goes in `RosterGM(node_root=...)`. `dry_run.py --roster` keeps its loud
+offline failure (now "a8s binary not found on PATH" when a8s is absent).
 5. **Wake latency is minutes-scale and the idle pass holds the single
    wake slot.** Observed: 4.5 min from receipt to wake once; the second
    time, a `r4t idle` dreaming/distillation pass (k7e distill of keeper's

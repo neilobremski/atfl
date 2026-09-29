@@ -28,19 +28,20 @@ opencode works with no login on the free path (verified 2026-09-28).
       (Memory, 2026-09-28: Tailscale plan gives SSH once Neil runs the
       one-time Mac-side install; without it there is no terminal path to
       the VM).
-- [ ] **Transport rework done** (session #33): `RosterGM` no longer shells
-      out to `r4t tell` expecting the reply on stdout — that path is
-      architecturally wrong (`r4t tell` is the owner's async impersonation
-      verb). The adapter sends `a8s tell fogline-gm '<envelope>'` and waits
-      on the game server's own a8s mailbox (`atfl-server`, mailbox-only
-      node, never started) for keeper's reply, with a tens-of-minutes
-      timeout (roster wake latency is minutes-scale; the `r4t idle`
-      dreaming pass can hold the single wake slot 15+ min). The
-      `compose_narrative` envelope carries the approved adjudication array
-      (fresh a8s threads per tell — keeper can't see the earlier tell).
+- [ ] **Transport rework done** (session #34, implemented): `RosterGM`
+      sends `a8s tell fogline-gm '<envelope>'` and waits on the game
+      server's own a8s mailbox (`atfl-server`, mailbox-only node,
+      registered but never started — a running daemon would consume
+      inbound before `a8s tells` sees them) for keeper's reply, up to a
+      30-min reply wait (roster wake latency is minutes-scale; the
+      `r4t idle` dreaming pass can hold the single wake slot 15+ min).
+      The `compose_narrative` envelope carries the approved adjudication
+      array (fresh a8s threads per tell — keeper can't see the earlier
+      tell). Node root goes in `RosterGM(node_root=...)`; send/poll halves
+      are injectable for hermetic tests.
 - [ ] Repo green locally: all `prototype/*_demo.py` pass, `poll --fake` smoke
-      clean. RosterGM behavior is already pinned hermetically
-      (`prototype/roster_demo.py`, 48 checks).
+      clean. RosterGM behavior is pinned hermetically
+      (`prototype/roster_demo.py`, 53 checks).
 - [ ] `~/ar3/fogline-gm/r4t.md` landed with the hard rules (answer yes/no,
       bare JSON for adjudication, never see hidden state) — draft lines are in
       `research/phase4-truth-rule-worked-examples.md`, §runbook sketch.
