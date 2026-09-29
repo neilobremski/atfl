@@ -143,10 +143,40 @@ MAX_NARRATIVE_WORDS = 2000
 REPLY_WAIT_S = 1800
 POLL_INTERVAL_S = 30
 
+# Re-prompt budget: after REPLY_WAIT_S elapses with no keeper reply, the
+# server sends ONE reprompt envelope (2026-09-29: an operator re-prompt
+# recovered the starved adjudicate return leg live — never reconstruct,
+# forward the already-produced artifact) and waits this long before
+# failing loudly via TurnFailed. None/0 disables the re-prompt.
+REPROMPT_WAIT_S = 300
+
 # Sender attribution on keeper's replies (correction 3: keeper replies to
 # the inbound sender, so production sends come from the game server's own
 # mailbox-only a8s node, e.g. atfl-server, never-started).
 KEEPER_SENDER = "fogline-gm:keeper"
+
+
+# The re-prompt is a new call type with its own key set (not a subset of
+# ENVELOPE_KEYS): it embeds the ORIGINAL envelope verbatim so keeper can
+# match the open call and reply with the already-produced artifact. The
+# original envelope is already filtered (build_envelope never consults
+# the DB), so embedding it here cannot leak hidden state.
+REPROMPT_KEYS = ("call", "game_guid", "turn_no", "game_clock",
+                 "original_call", "original_envelope")
+
+
+def build_reprompt_envelope(original_envelope):
+    """One nudge after a silent reply wait. The roster must reply with the
+    already-produced artifact for the original call (or finish it from
+    the original envelope) — never redo the work, never re-consult."""
+    return {
+        "call": "reprompt",
+        "game_guid": original_envelope["game_guid"],
+        "turn_no": original_envelope["turn_no"],
+        "game_clock": original_envelope["game_clock"],
+        "original_call": original_envelope["call"],
+        "original_envelope": original_envelope,
+    }
 
 
 def game_clock_label(clock_min):
@@ -220,6 +250,14 @@ class RosterGM(GameMaster):
     sees them. `node_root` is that node's root directory (the cwd `a8s
     tells` must run from).
 
+    When the reply wait exhausts with no keeper reply, one `reprompt`
+    envelope goes out (the original envelope verbatim, with
+    original_call + REPROMPT_KEYS) and the wait re-arms for
+    reprompt_wait_s — the live-validated operator recovery pattern,
+    automated. A late reply to the original call still counts (the poll
+    correlates everything newer than the original send). Only after the
+    re-prompt also times out does the call fail loudly.
+
     Every roster-side failure raises RosterTurnFailed (a TurnFailed), so
     the dispatch retry-once path covers it with no new machinery.
     Model-independent defenses (yes/no-only mutations, secrecy_check,
@@ -229,6 +267,7 @@ class RosterGM(GameMaster):
     def __init__(self, roster_name="fogline-gm",
                  reply_wait_s=REPLY_WAIT_S,
                  poll_interval_s=POLL_INTERVAL_S,
+                 reprompt_wait_s=REPROMPT_WAIT_S,
                  max_narrative_words=MAX_NARRATIVE_WORDS,
                  node_root=None,
                  keeper_sender=KEEPER_SENDER,
@@ -236,6 +275,7 @@ class RosterGM(GameMaster):
         self.roster_name = roster_name
         self.reply_wait_s = reply_wait_s
         self.poll_interval_s = poll_interval_s
+        self.reprompt_wait_s = reprompt_wait_s
         self.max_narrative_words = max_narrative_words
         self.node_root = node_root
         self.keeper_sender = keeper_sender
@@ -318,29 +358,26 @@ class RosterGM(GameMaster):
                 return body
         return None
 
-    def _call(self, call, context, player_input="", questions=None,
-              filtered=None, catchup=""):
+    def _send(self, payload):
         from .turn_loop import TurnFailed  # lazy: turn_loop imports .gm
-        ctx = context or {}
-        envelope = build_envelope(
-            call, ctx.get("game_guid", ""), ctx.get("turn_no", 0),
-            ctx.get("game_clock", ""), player_input,
-            filtered or {}, PLOT_ROSTER, catchup,
-            adjudication=questions if call == "compose_narrative" else None)
-        payload = json.dumps(envelope)
         try:
             self.send_fn(payload)
         except TurnFailed:
             raise
         except Exception as e:
             _turn_failed(f"roster send failed: {type(e).__name__}: {e}")
-        sent_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        deadline = time.monotonic() + self.reply_wait_s
+
+    def _wait(self, sent_at, budget_s):
+        """Poll until a keeper reply newer than sent_at arrives, or the
+        budget exhausts. Returns the reply body, or None on timeout
+        (timeout is a soft signal here — the caller decides whether to
+        re-prompt or fail loudly)."""
+        from .turn_loop import TurnFailed  # lazy: turn_loop imports .gm
+        deadline = time.monotonic() + budget_s
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                _turn_failed(
-                    f"no roster reply within {self.reply_wait_s}s for {call}")
+                return None
             try:
                 body = self.poll_fn(min(self.poll_interval_s, remaining),
                                     sent_at)
@@ -351,6 +388,33 @@ class RosterGM(GameMaster):
                     f"roster mailbox poll failed: {type(e).__name__}: {e}")
             if body:
                 return body
+
+    def _call(self, call, context, player_input="", questions=None,
+              filtered=None, catchup=""):
+        ctx = context or {}
+        envelope = build_envelope(
+            call, ctx.get("game_guid", ""), ctx.get("turn_no", 0),
+            ctx.get("game_clock", ""), player_input,
+            filtered or {}, PLOT_ROSTER, catchup,
+            adjudication=questions if call == "compose_narrative" else None)
+        self._send(json.dumps(envelope))
+        sent_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        body = self._wait(sent_at, self.reply_wait_s)
+        if body is None and self.reprompt_wait_s:
+            # One bounded re-prompt before the loud failure: the
+            # starved return leg may already exist on the roster side
+            # (session #37 — the artifact was produced but never sent).
+            reprompt = build_reprompt_envelope(envelope)
+            self._send(json.dumps(reprompt))
+            # Keep the ORIGINAL sent_at: a late reply to the original
+            # call arriving during the re-prompt wait is the reply.
+            body = self._wait(sent_at, self.reprompt_wait_s)
+        if body is None:
+            budget = (f"{self.reply_wait_s}s"
+                      + (f" + {self.reprompt_wait_s}s re-prompt"
+                         if self.reprompt_wait_s else ""))
+            _turn_failed(f"no roster reply within {budget} for {call}")
+        return body
 
     def pick_plot(self, roster, context=None):
         reply = self._call("pick_plot", context)

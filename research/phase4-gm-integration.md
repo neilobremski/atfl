@@ -313,6 +313,17 @@ Design consequences (open, for the charter + RosterGM):
    with no reply (currently a silent timeout); the recovery mechanism
    used here was an operator re-prompt tell instructing keeper to forward
    arbiter's already-produced array verbatim via `tell atfl-server`.
+   **DONE 2026-09-29 (session #39):** server/gm.py `_call` now sends ONE
+   `reprompt` envelope after reply_wait_s (REPROMPT_KEYS: call,
+   game_guid, turn_no, game_clock, original_call, original_envelope —
+   original embedded verbatim, never reconstructed), waits a bounded
+   reprompt_wait_s (default 300s; None/0 disables), then fails loudly
+   via TurnFailed. A late reply to the original call during the
+   re-prompt wait still counts (original sent_at kept). Charter amended
+   (fogline-gm/r4t.md "Reprompt" paragraph) so keeper answers with the
+   already-produced artifact verbatim. Hermetic coverage: 11 new checks
+   in prototype/roster_demo.py §11 (64 total, green). Operator re-prompt
+   remains the manual fallback.
 3. Critic's pre-send review needs a fidelity check (byte-level question
    reproduction) in addition to shape/secrecy — transcription drift was
    only caught post-delivery this time. **DONE 2026-09-29 (session #38):**

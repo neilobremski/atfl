@@ -7,7 +7,8 @@ it — one script fn serves both halves), so no roster, no subprocess, no
 network. All green = the adapter honors the phase4 contract: exact
 envelope schema with no hidden-state leak, strict adjudication
 validation, narrative word cap, pick validation, async send+poll with a
-bounded reply wait, and every roster failure surfacing as a TurnFailed
+bounded reply wait plus ONE re-prompt before the loud failure, and every
+roster failure surfacing as a TurnFailed
 so dispatch.py's §2.6 retry-once path covers it.
 
 Run from the repo root: python3 prototype/roster_demo.py
@@ -271,13 +272,15 @@ for bad in ("real", "bogus", "ROSTER "):
     check(f"ATFL_GM={bad!r} refused", refused if bad != "ROSTER " else not refused)
 
 print("\n== 10. async transport: bounded reply wait, adjudication on narrative ==")
-# The poll loop never answers -> the bounded wait fires.
+# The poll loop never answers -> the bounded wait (+ one bounded
+# re-prompt) fires. Small reprompt_wait_s keeps the hermetic run fast.
 silent = RosterGM(send_fn=lambda j: None,
                   poll_fn=lambda t, s: None,
-                  reply_wait_s=0.05, poll_interval_s=0.05)
+                  reply_wait_s=0.05, poll_interval_s=0.05,
+                  reprompt_wait_s=0.05)
 err = raises_turn_failed(
     lambda: silent.adjudicate("x", {}, context={"game_guid": "g"}))
-check("no keeper reply within the wait -> TurnFailed", err is not None
+check("no keeper reply within the waits -> TurnFailed", err is not None
       and "no roster reply" in err)
 # A poll-side blowup (a8s tells failing) surfaces as TurnFailed too.
 def poll_boom(timeout_s, since_iso):
@@ -302,5 +305,76 @@ gm, fake = gm_script(lambda j: json.dumps(GOOD_Q))
 gm.adjudicate("look", {}, context={})
 check("adjudicate/pick_plot envelopes carry an empty adjudication list",
       all(e["adjudication"] == [] for e in fake.sent))
+
+print("\n== 11. re-prompt: one bounded nudge before the loud failure ==")
+# A silent roster exhausts the first wait -> exactly ONE reprompt goes
+# out -> the re-prompt wait also exhausts -> TurnFailed.
+silent2 = RosterGM(send_fn=lambda j: None,
+                   poll_fn=lambda t, s: None,
+                   reply_wait_s=0.05, poll_interval_s=0.05,
+                   reprompt_wait_s=0.05)
+def reprompt_script(seen):
+    def script(payload):
+        seen.append(json.loads(payload))
+        return None
+    return script
+seen = []
+err = raises_turn_failed(lambda: RosterGM(
+    send_fn=reprompt_script(seen), poll_fn=lambda t, s: None,
+    reply_wait_s=0.05, poll_interval_s=0.05, reprompt_wait_s=0.05
+    ).adjudicate("x", {}, context={"game_guid": "g"}))
+check("double timeout -> TurnFailed naming both budgets",
+      err is not None and "no roster reply" in err and "re-prompt" in err)
+check("exactly two envelopes sent: original then reprompt",
+      [e["call"] for e in seen] == ["adjudicate", "reprompt"])
+rep = seen[1]
+check("reprompt carries exactly the REPROMPT_KEYS",
+      set(rep) == set(("call", "game_guid", "turn_no", "game_clock",
+                       "original_call", "original_envelope")))
+check("reprompt names the original call",
+      rep["original_call"] == "adjudicate")
+check("reprompt embeds the original envelope verbatim",
+      rep["original_envelope"] == seen[0])
+check("reprompt leaks no hidden state",
+      "hidden_traits" not in json.dumps(rep)
+      and "earth-changing" not in json.dumps(rep["original_envelope"]["filtered"]))
+# A reply to the re-prompt is accepted and validated like any reply.
+def recovery_script(seen):
+    def script(payload):
+        env = json.loads(payload)
+        seen.append(env)
+        if env["call"] == "reprompt":
+            return json.dumps(GOOD_Q)
+        return None  # silent on the original call
+    return script
+seen2 = []
+gm, fake2 = gm_script(recovery_script(seen2), reply_wait_s=0.05,
+                      poll_interval_s=0.05, reprompt_wait_s=1)
+check("starved call recovered by the re-prompt",
+      gm.adjudicate("x", {}, context={}) == GOOD_Q)
+check("recovery sent original + reprompt only",
+      [e["call"] for e in fake2.sent] == ["adjudicate", "reprompt"])
+# reprompt_wait_s=0/None disables the re-prompt: fail loud after one send.
+for off in (0, None):
+    seen3 = []
+    err = raises_turn_failed(lambda s=seen3, o=off: RosterGM(
+        send_fn=reprompt_script(s), poll_fn=lambda t, si: None,
+        reply_wait_s=0.05, poll_interval_s=0.05,
+        reprompt_wait_s=o).pick_plot(["aliens"], context={}))
+    check(f"reprompt disabled ({off!r}) -> one send, then TurnFailed",
+          err is not None and "no roster reply" in err
+          and "re-prompt" not in err and len(seen3) == 1
+          and seen3[0]["call"] == "pick_plot")
+# Late replies to the ORIGINAL call during the re-prompt wait still count.
+def late_reply_script():
+    state = {"n": 0}
+    def script(payload):
+        state["n"] += 1
+        return "The fog holds." if state["n"] > 1 else None
+    return script
+gm, _ = gm_script(late_reply_script(), reply_wait_s=0.05,
+                  poll_interval_s=0.05, reprompt_wait_s=1)
+check("late original-call reply during re-prompt wait accepted",
+      gm.compose_narrative("x", [], {}, "", context={}) == "The fog holds.")
 
 print(f"\nroster demo green — {len(checks)} checks, 0 FAILs.")
