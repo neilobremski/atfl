@@ -307,17 +307,54 @@ class RosterGM(GameMaster):
         Outbound MUST go from node_root (keeper replies to the inbound
         sender) — a missing node_root fails loudly here, before any
         subprocess runs, instead of silently sending from the caller's
-        cwd and stranding the reply."""
+        cwd and stranding the reply.
+        TELL_OUTBOX_DIR guard (found live 2026-09-30): `a8s tell`
+        prefers the TELL_OUTBOX_DIR env var over the cwd-based registry
+        lookup, so a stray export (a documented workspace convention for
+        bare-shell sends) silently routed roster calls through the wrong
+        node's outbox; the ingesting daemon force-overwrote `from`, the
+        keeper replied to the wrong mailbox, and the reply poll starved
+        for two full attempts while the keeper was actually answering.
+        The var is scrubbed from the child env and the resolved outbox
+        is verified against node_root before anything is sent."""
         if not self.node_root or not os.path.isdir(self.node_root):
             _turn_failed(
                 "RosterGM node_root is not set — register the game "
                 "server's mailbox-only a8s node (e.g. atfl-server) and "
                 "point RosterGM at its root directory")
         a8s = _a8s_bin()
+        node_root = os.path.realpath(self.node_root)
+        # Scrub TELL_OUTBOX_DIR: it overrides the cwd-based outbox
+        # resolution and would silently attribute the send to whatever
+        # node owns that outbox (found live 2026-09-30).
+        child_env = {k: v for k, v in os.environ.items()
+                     if k != "TELL_OUTBOX_DIR"}
+        try:
+            check = subprocess.run(
+                [a8s, "tell", "--check", self.roster_name],
+                capture_output=True, text=True, timeout=60,
+                cwd=self.node_root, env=child_env)
+        except subprocess.TimeoutExpired:
+            _turn_failed("a8s tell --check did not return within 60s")
+        if check.returncode != 0:
+            _turn_failed(
+                f"a8s tell --check {self.roster_name} exited "
+                f"{check.returncode}: {check.stderr.strip()[:200]}")
+        outbox = None
+        for line in check.stdout.splitlines():
+            if line.startswith("  outbox: "):
+                outbox = os.path.realpath(line[len("  outbox: "):].strip())
+                break
+        if not outbox or os.path.commonpath([outbox, node_root]) != node_root:
+            _turn_failed(
+                f"a8s tell would send from outbox {outbox!r}, outside "
+                f"node_root {node_root!r} — refusing to strand the keeper "
+                "reply in the wrong mailbox")
         try:
             start = subprocess.run(
                 [a8s, "start", self.node_name],
-                capture_output=True, text=True, timeout=60)
+                capture_output=True, text=True, timeout=60,
+                env=child_env)
             if start.returncode != 0:
                 _turn_failed(f"a8s start {self.node_name} exited "
                              f"{start.returncode}: "
@@ -326,7 +363,7 @@ class RosterGM(GameMaster):
                 proc = subprocess.run(
                     [a8s, "tell", self.roster_name, envelope_json],
                     capture_output=True, text=True, timeout=60,
-                    cwd=self.node_root)
+                    cwd=self.node_root, env=child_env)
             finally:
                 # Stop failure is loud, not best-effort: a daemon left
                 # running races the reply poll and would silently starve
@@ -334,7 +371,8 @@ class RosterGM(GameMaster):
                 try:
                     stop = subprocess.run(
                         [a8s, "stop", self.node_name],
-                        capture_output=True, text=True, timeout=660)
+                        capture_output=True, text=True, timeout=660,
+                        env=child_env)
                 except subprocess.TimeoutExpired:
                     _turn_failed(
                         f"a8s stop {self.node_name} did not return within "

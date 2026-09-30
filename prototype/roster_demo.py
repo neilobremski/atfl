@@ -433,11 +433,24 @@ def send_with_stub(gm, script):
 
 
 def ok_script(argv, kwargs):
+    if argv[1:3] == ["tell", "--check"]:
+        return (0, f"tell: ok\n  outbox: {ROOT}/.outbox\n", "")
     return (0, "", "")
+
+
+def check_outbox_script(outbox):
+    """--check resolves to `outbox`; everything else succeeds."""
+    def script(argv, kwargs):
+        if argv[1:3] == ["tell", "--check"]:
+            return (0, f"tell: ok\n  outbox: {outbox}\n", "")
+        return (0, "", "")
+    return script
 
 
 def fail_verb(verb):
     def script(argv, kwargs):
+        if argv[1:3] == ["tell", "--check"]:
+            return (0, f"tell: ok\n  outbox: {ROOT}/.outbox\n", "")
         return (1, "", "boom") if argv[1] == verb else (0, "", "")
     return script
 
@@ -446,40 +459,75 @@ ROOT = tempfile.mkdtemp(prefix="atfl-node-")
 BIN = gm_mod._a8s_bin()
 gm12 = RosterGM(node_root=ROOT)
 calls, err = send_with_stub(gm12, ok_script)
-check("happy path: start, tell, stop in order",
-      [c[0][1] for c in calls] == ["start", "tell", "stop"])
-check("all three verbs use the resolved a8s binary",
+check("happy path: check, start, tell, stop in order",
+      [c[0][1:] for c in calls] == [["tell", "--check", "fogline-gm"],
+                                    ["start", "atfl-server"],
+                                    ["tell", "fogline-gm",
+                                     '{"call":"adjudicate"}'],
+                                    ["stop", "atfl-server"]])
+check("all four verbs use the resolved a8s binary",
       all(c[0][0] == BIN for c in calls) and BIN)
 check("start/stop name the node, tell names the roster",
-      calls[0][0] == [BIN, "start", "atfl-server"]
-      and calls[1][0] == [BIN, "tell", "fogline-gm", '{"call":"adjudicate"}']
-      and calls[2][0] == [BIN, "stop", "atfl-server"])
-check("tell runs with cwd=node_root", calls[1][1].get("cwd") == ROOT)
+      calls[1][0] == [BIN, "start", "atfl-server"]
+      and calls[2][0] == [BIN, "tell", "fogline-gm", '{"call":"adjudicate"}']
+      and calls[3][0] == [BIN, "stop", "atfl-server"])
+check("check+tell run with cwd=node_root",
+      calls[0][1].get("cwd") == ROOT and calls[2][1].get("cwd") == ROOT)
 check("happy path sends with no TurnFailed", err is None)
+# TELL_OUTBOX_DIR hijack guard (2026-09-30 live bug): the var must be
+# scrubbed from every child env, or a stray export silently routes the
+# send through the wrong node's outbox and strands the keeper reply.
+os.environ["TELL_OUTBOX_DIR"] = "/tmp/some-other-node/.outbox"
+try:
+    calls, err = send_with_stub(gm12, ok_script)
+finally:
+    del os.environ["TELL_OUTBOX_DIR"]
+check("TELL_OUTBOX_DIR scrubbed from the tell child env "
+      "(2026-09-30: stray export sent roster calls as murph)",
+      err is None and all(
+          "TELL_OUTBOX_DIR" not in (c[1].get("env") or {})
+          for c in calls))
+calls, err = send_with_stub(
+    gm12, check_outbox_script("/tmp/some-other-node/.outbox"))
+check("outbox outside node_root -> TurnFailed before start, no tell sent",
+      err is not None and "outbox" in err and "node_root" in err
+      and [c[0][1] for c in calls] == ["tell"])
+calls, err = send_with_stub(
+    gm12, lambda argv, kw: (1, "", "boom")
+    if argv[1:3] == ["tell", "--check"] else (0, "", ""))
+check("--check failure -> TurnFailed naming the check, nothing else ran",
+      err is not None and "tell --check" in err
+      and [c[0][1] for c in calls] == ["tell"])
 gm_named = RosterGM(node_name="game-mailbox", node_root=ROOT)
 calls, _ = send_with_stub(gm_named, ok_script)
 check("node_name override respected by start/stop",
-      calls[0][0][2] == "game-mailbox" and calls[2][0][2] == "game-mailbox")
+      calls[1][0][2] == "game-mailbox" and calls[3][0][2] == "game-mailbox")
 check("node_name defaults to atfl-server", RosterGM().node_name == "atfl-server")
 calls, err = send_with_stub(gm12, fail_verb("tell"))
 check("tell failure -> TurnFailed naming the tell",
       err is not None and "a8s tell" in err)
 check("stop still runs when tell fails (finally)",
-      [c[0][1] for c in calls] == ["start", "tell", "stop"])
+      [c[0][1] for c in calls] == ["tell", "start", "tell", "stop"])
 calls, err = send_with_stub(gm12, fail_verb("start"))
 check("start failure -> TurnFailed naming the start, no tell, no stop",
       err is not None and "a8s start" in err
-      and [c[0][1] for c in calls] == ["start"])
+      and [c[0][1] for c in calls] == ["tell", "start"])
 calls, err = send_with_stub(gm12, fail_verb("stop"))
 check("stop failure -> TurnFailed naming the stop (poll would race a daemon)",
       err is not None and "a8s stop" in err and "daemon" in err
-      and [c[0][1] for c in calls] == ["start", "tell", "stop"])
-calls, err = send_with_stub(
-    gm12, lambda argv, kw: subprocess.TimeoutExpired(argv, 60)
-    if argv[1] == "tell" else (0, "", ""))
+      and [c[0][1] for c in calls] == ["tell", "start", "tell", "stop"])
+def tell_timeout_script(argv, kwargs):
+    if argv[1:3] == ["tell", "--check"]:
+        return (0, f"tell: ok\n  outbox: {ROOT}/.outbox\n", "")
+    if argv[1] == "tell":
+        raise subprocess.TimeoutExpired(argv, 60)
+    return (0, "", "")
+
+
+calls, err = send_with_stub(gm12, tell_timeout_script)
 check("tell timeout -> TurnFailed naming the 60s send budget, stop still ran",
       err is not None and "60s" in err
-      and [c[0][1] for c in calls] == ["start", "tell", "stop"])
+      and [c[0][1] for c in calls] == ["tell", "start", "tell", "stop"])
 calls, err = send_with_stub(RosterGM(), ok_script)  # node_root unset
 check("missing node_root -> TurnFailed before any subprocess runs",
       err is not None and "node_root" in err and calls == [])
