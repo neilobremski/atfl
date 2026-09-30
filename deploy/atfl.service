@@ -13,6 +13,12 @@ EnvironmentFile=/etc/atfl/atfl.env
 ExecStart=/srv/atfl/venv/bin/python -m server.poll
 Restart=always
 RestartSec=30
+# A loud startup refusal (exit 2: config error, e.g. ATFL_GAME_ADDRESS
+# unset — the open game-identity question) never heals on retry, so don't
+# flap it every 30s; the unit lands in "failed" with the refusal in the
+# journal until the config is fixed. Real crashes (OOM, host reboot, VM
+# replacement) still auto-restart.
+RestartPreventExitStatus=2
 # Per-cycle crashes are already swallowed by the poll loop (it logs and
 # continues); Restart=always covers the process itself dying (OOM, host
 # reboot, VM replacement). The games dir holds everything durable —
