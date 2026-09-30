@@ -491,6 +491,52 @@ err = raises_turn_failed(
     lambda: RosterGM()._poll_real(1, "2026-01-01T00:00:00Z"))
 check("_poll_real without node_root -> TurnFailed (no subprocess)",
       err is not None and "node_root" in err)
+
+
+def poll_with_stub(gm, script):
+    """Run gm._poll_real with a stubbed subprocess; returns (calls, body)."""
+    fake = FakeRun(script)
+    stub = types.SimpleNamespace(run=fake,
+                                 TimeoutExpired=subprocess.TimeoutExpired)
+    real = gm_mod.subprocess
+    gm_mod.subprocess = stub
+    try:
+        body = gm._poll_real(5, "2026-09-30T00:00:00Z")
+    finally:
+        gm_mod.subprocess = real
+    return fake.calls, body
+
+
+def keeper_row(utc, body, frm="fogline-gm:keeper"):
+    return json.dumps({"ulid": "01TEST", "seq": 1, "from": frm,
+                       "to": "atfl-server", "utc": utc, "content": body})
+
+
+gm_poll = RosterGM(node_name="atfl-server", node_root=ROOT)
+calls, body = poll_with_stub(
+    gm_poll, lambda argv, kw: (0, keeper_row("2026-09-30T01:00:50Z",
+                                            "earth-changing"), ""))
+check("poll reads the NODE mailbox, not the roster thread "
+      "(2026-09-29 live bug: convo fogline-gm showed zero rows forever)",
+      calls[0][0] == [BIN, "convo", "atfl-server",
+                      "--from", "fogline-gm:keeper", "--json", "--limit", "25"]
+      and body == "earth-changing")
+gm_poll_named = RosterGM(node_name="game-mailbox", node_root=ROOT)
+calls, _ = poll_with_stub(
+    gm_poll_named, lambda argv, kw: (0, "", ""))
+check("poll respects node_name override", calls[0][0][2] == "game-mailbox")
+calls, body = poll_with_stub(
+    gm_poll, lambda argv, kw: (0, keeper_row("2026-09-29T23:00:00Z",
+                                            "earth-changing"), ""))
+check("poll ignores keeper rows older than since_iso", body is None)
+calls, body = poll_with_stub(
+    gm_poll, lambda argv, kw: (0, keeper_row("2026-09-30T01:00:50Z",
+                                            "earth-changing",
+                                            frm="fogline-gm:critic"), ""))
+check("poll ignores rows from other roster members", body is None)
+calls, body = poll_with_stub(
+    gm_poll, lambda argv, kw: (0, keeper_row("2026-09-30T01:00:50Z", "   "), ""))
+check("poll ignores empty keeper rows", body is None)
 old_bin = os.environ.get("ATFL_A8S_BIN")
 os.environ["ATFL_A8S_BIN"] = "/bin/true"
 try:

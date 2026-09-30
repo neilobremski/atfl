@@ -356,20 +356,28 @@ class RosterGM(GameMaster):
         """One poll arm on the game server's mailbox node; returns the first
         keeper reply newer than since_iso, or None.
 
-        Uses `a8s convo <roster> --from <keeper> --json` (verified working
-        live 2026-09-29 — the documented `tells --from`/`--json`/`--since`
-        flags are all rejected or broken in a8s 0.1.97; see _send_real's
-        publish note and the ares bug report). One arm is a fast history
-        read; `_call` re-arms every poll_interval_s until the reply wait
-        deadline. Python-side sender + timestamp filtering is the real
-        correlation — `--from` is belt only."""
+        Uses `a8s convo <node_name> --from <keeper> --json` — the game
+        server's OWN mailbox node, because keeper replies to the inbound
+        sender (the node that sent the call). NOT `convo <roster_name>`:
+        the roster thread only shows our outbound calls, so polling it
+        returns zero rows forever while keeper replies pile up unheard
+        in the node mailbox (live-caught 2026-09-29: six "earth-changing"
+        replies sat in atfl-server's mailbox while every poll arm read
+        the fogline-gm thread and timed out).
+
+        Verified working live 2026-09-29 — the documented `tells --from`/
+        `--json`/`--since` flags are all rejected or broken in a8s 0.1.97;
+        see _send_real's publish note and the ares bug report. One arm is
+        a fast history read; `_call` re-arms every poll_interval_s until
+        the reply wait deadline. Python-side sender + timestamp filtering
+        is the real correlation — `--from` is belt only."""
         if not self.node_root or not os.path.isdir(self.node_root):
             _turn_failed(
                 "RosterGM node_root is not set — register the game "
                 "server's mailbox-only a8s node (e.g. atfl-server) and "
                 "point RosterGM at its root directory")
         proc = subprocess.run(
-            [_a8s_bin(), "convo", self.roster_name,
+            [_a8s_bin(), "convo", self.node_name,
              "--from", self.keeper_sender, "--json", "--limit", "25"],
             capture_output=True, text=True, timeout=timeout_s + 30,
             cwd=self.node_root)

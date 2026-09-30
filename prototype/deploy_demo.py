@@ -109,7 +109,7 @@ known_directives = {
     "Service": {"Type", "User", "Group", "WorkingDirectory",
                 "EnvironmentFile", "ExecStart", "Restart", "RestartSec",
                 "NoNewPrivileges", "ProtectSystem", "ReadWritePaths",
-                "ProtectHome", "PrivateTmp"},
+                "ProtectHome", "PrivateTmp", "RestartPreventExitStatus"},
     "Install": {"WantedBy"},
 }
 check("unit has exactly [Unit]/[Service]/[Install] sections",
