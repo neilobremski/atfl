@@ -8,12 +8,14 @@ network. All green = the adapter honors the phase4 contract: exact
 envelope schema with no hidden-state leak, strict adjudication
 validation, narrative word cap, pick validation, async send+poll with a
 bounded reply wait plus ONE re-prompt before the loud failure, the
-start-send-stop publish discipline enforced in code (§12), and every
-roster failure surfacing as a TurnFailed
+start-send-stop publish discipline enforced in code (§12), reply-shape
+correlation so stale/duplicate wrong-call replies are skipped (§13),
+and every roster failure surfacing as a TurnFailed
 so dispatch.py's §2.6 retry-once path covers it.
 
 Run from the repo root: python3 prototype/roster_demo.py
 """
+import datetime
 import json
 import os
 import sqlite3
@@ -53,22 +55,43 @@ def raises_turn_failed(fn):
     return None
 
 
+def _utc_after(since_iso, seconds=1):
+    """Deterministic fake reply timestamp: since_iso + N seconds, so the
+    fake reply always sorts strictly newer than the cursor that asked."""
+    dt = datetime.datetime.strptime(since_iso, "%Y-%m-%dT%H:%M:%SZ")
+    return (dt + datetime.timedelta(seconds=seconds)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
 class FakeRoster:
     """Hermetic stand-in for the async a8s transport: send_fn records
     each envelope, poll_fn answers from the last one via script, so one
-    script fn serves both halves of the send+poll contract."""
+    script fn serves both halves of the send+poll contract. poll_fn
+    returns [(utc, body)] oldest-first like the real _poll_real (every
+    since_iso/cursor seen is recorded in poll_since); the script may
+    return one reply str, a list of them (one row each), or None for
+    silence."""
 
     def __init__(self, script):
-        self.script = script  # script(payload_json_str) -> reply str
+        self.script = script  # script(payload_json_str) -> reply
         self.sent = []        # decoded envelopes, in send order
         self._last = None
+        self.poll_since = []
 
     def send_fn(self, payload):
         self._last = payload
         self.sent.append(json.loads(payload))
 
     def poll_fn(self, timeout_s, since_iso):
-        return self.script(self._last) if self._last is not None else None
+        self.poll_since.append(since_iso)
+        if self._last is None:
+            return []
+        reply = self.script(self._last)
+        if reply is None:
+            return []
+        bodies = reply if isinstance(reply, list) else [reply]
+        return [(_utc_after(since_iso, i + 1), b)
+                for i, b in enumerate(bodies)]
 
 
 def gm_script(script, **kw):
@@ -292,7 +315,7 @@ print("\n== 10. async transport: bounded reply wait, adjudication on narrative =
 # The poll loop never answers -> the bounded wait (+ one bounded
 # re-prompt) fires. Small reprompt_wait_s keeps the hermetic run fast.
 silent = RosterGM(send_fn=lambda j: None,
-                  poll_fn=lambda t, s: None,
+                  poll_fn=lambda t, s: [],
                   reply_wait_s=0.05, poll_interval_s=0.05,
                   reprompt_wait_s=0.05)
 err = raises_turn_failed(
@@ -327,7 +350,7 @@ print("\n== 11. re-prompt: one bounded nudge before the loud failure ==")
 # A silent roster exhausts the first wait -> exactly ONE reprompt goes
 # out -> the re-prompt wait also exhausts -> TurnFailed.
 silent2 = RosterGM(send_fn=lambda j: None,
-                   poll_fn=lambda t, s: None,
+                   poll_fn=lambda t, s: [],
                    reply_wait_s=0.05, poll_interval_s=0.05,
                    reprompt_wait_s=0.05)
 def reprompt_script(seen):
@@ -337,7 +360,7 @@ def reprompt_script(seen):
     return script
 seen = []
 err = raises_turn_failed(lambda: RosterGM(
-    send_fn=reprompt_script(seen), poll_fn=lambda t, s: None,
+    send_fn=reprompt_script(seen), poll_fn=lambda t, s: [],
     reply_wait_s=0.05, poll_interval_s=0.05, reprompt_wait_s=0.05
     ).adjudicate("x", {}, context={"game_guid": "g"}))
 check("double timeout -> TurnFailed naming both budgets",
@@ -375,7 +398,7 @@ check("recovery sent original + reprompt only",
 for off in (0, None):
     seen3 = []
     err = raises_turn_failed(lambda s=seen3, o=off: RosterGM(
-        send_fn=reprompt_script(s), poll_fn=lambda t, si: None,
+        send_fn=reprompt_script(s), poll_fn=lambda t, si: [],
         reply_wait_s=0.05, poll_interval_s=0.05,
         reprompt_wait_s=o).pick_plot(["aliens"], context={}))
     check(f"reprompt disabled ({off!r}) -> one send, then TurnFailed",
@@ -596,17 +619,18 @@ check("_poll_real without node_root -> TurnFailed (no subprocess)",
 
 
 def poll_with_stub(gm, script):
-    """Run gm._poll_real with a stubbed subprocess; returns (calls, body)."""
+    """Run gm._poll_real with a stubbed subprocess; returns (calls, rows)
+    where rows is [(utc, body)] oldest-first."""
     fake = FakeRun(script)
     stub = types.SimpleNamespace(run=fake,
                                  TimeoutExpired=subprocess.TimeoutExpired)
     real = gm_mod.subprocess
     gm_mod.subprocess = stub
     try:
-        body = gm._poll_real(5, "2026-09-30T00:00:00Z")
+        rows = gm._poll_real(5, "2026-09-30T00:00:00Z")
     finally:
         gm_mod.subprocess = real
-    return fake.calls, body
+    return fake.calls, rows
 
 
 def keeper_row(utc, body, frm="fogline-gm:keeper"):
@@ -615,30 +639,38 @@ def keeper_row(utc, body, frm="fogline-gm:keeper"):
 
 
 gm_poll = RosterGM(node_name="atfl-server", node_root=ROOT)
-calls, body = poll_with_stub(
+calls, rows = poll_with_stub(
     gm_poll, lambda argv, kw: (0, keeper_row("2026-09-30T01:00:50Z",
                                             "earth-changing"), ""))
 check("poll reads the NODE mailbox, not the roster thread "
       "(2026-09-29 live bug: convo fogline-gm showed zero rows forever)",
       calls[0][0] == [BIN, "convo", "atfl-server",
                       "--from", "fogline-gm:keeper", "--json", "--limit", "25"]
-      and body == "earth-changing")
+      and rows == [("2026-09-30T01:00:50Z", "earth-changing")])
 gm_poll_named = RosterGM(node_name="game-mailbox", node_root=ROOT)
 calls, _ = poll_with_stub(
     gm_poll_named, lambda argv, kw: (0, "", ""))
 check("poll respects node_name override", calls[0][0][2] == "game-mailbox")
-calls, body = poll_with_stub(
+calls, rows = poll_with_stub(
     gm_poll, lambda argv, kw: (0, keeper_row("2026-09-29T23:00:00Z",
                                             "earth-changing"), ""))
-check("poll ignores keeper rows older than since_iso", body is None)
-calls, body = poll_with_stub(
+check("poll ignores keeper rows older than since_iso", rows == [])
+calls, rows = poll_with_stub(
     gm_poll, lambda argv, kw: (0, keeper_row("2026-09-30T01:00:50Z",
                                             "earth-changing",
                                             frm="fogline-gm:critic"), ""))
-check("poll ignores rows from other roster members", body is None)
-calls, body = poll_with_stub(
+check("poll ignores rows from other roster members", rows == [])
+calls, rows = poll_with_stub(
     gm_poll, lambda argv, kw: (0, keeper_row("2026-09-30T01:00:50Z", "   "), ""))
-check("poll ignores empty keeper rows", body is None)
+check("poll ignores empty keeper rows", rows == [])
+calls, rows = poll_with_stub(
+    gm_poll, lambda argv, kw: (0,
+        keeper_row("2026-09-30T01:00:50Z", "earth-changing") + "\n"
+        + keeper_row("2026-09-30T01:01:10Z", "earth-changing"), ""))
+check("poll returns every candidate row oldest-first (the wait, not the "
+      "poll, applies the reply-shape gate)",
+      rows == [("2026-09-30T01:00:50Z", "earth-changing"),
+               ("2026-09-30T01:01:10Z", "earth-changing")])
 old_bin = os.environ.get("ATFL_A8S_BIN")
 os.environ["ATFL_A8S_BIN"] = "/bin/true"
 try:
@@ -648,5 +680,75 @@ finally:
         del os.environ["ATFL_A8S_BIN"]
     else:
         os.environ["ATFL_A8S_BIN"] = old_bin
+
+print("\n== 13. reply-shape correlation: skip stale/duplicate wrong-call replies ==")
+# Live 2026-09-30 (dryrun3): the keeper answers stale and duplicate
+# calls, and the old first-newer-reply matcher consumed them as the
+# current call's answer — a late adjudicate JSON failed a plot pick as
+# "not on the §4.3 roster", and a duplicate "earth-changing" failed an
+# adjudication's JSON parse. _wait now gates each call on reply shape
+# and advances the cursor past skipped replies, so a later correct
+# reply stays reachable. Genuinely malformed replies still fail loudly
+# in the call method's own validation — the gate only skips shapes that
+# unambiguously belong to a different call.
+STALE_ADJ = json.dumps([{"q": "Does anything change?", "answer": "yes",
+                         "rationale": "stale answer to a dead call",
+                         "effect": None}])
+
+# pick_plot skips a stale adjudicate JSON, then takes the later pick.
+n1 = {"n": 0}
+def pick_script(payload):
+    n1["n"] += 1
+    return [STALE_ADJ, "earth-changing"][min(n1["n"], 2) - 1]
+gm, fake = gm_script(pick_script, reply_wait_s=5, poll_interval_s=0.05)
+check("pick_plot skips JSON (stale adjudicate) then accepts the pick",
+      gm.pick_plot(["aliens", "earth-changing"], context={})
+      == "earth-changing")
+check("cursor advanced past the skipped reply",
+      len(fake.poll_since) >= 2 and fake.poll_since[1] > fake.poll_since[0])
+
+# adjudicate skips a duplicate bare pick, then takes the later JSON.
+n2 = {"n": 0}
+def adj_script(payload):
+    n2["n"] += 1
+    return ["earth-changing", json.dumps(GOOD_Q)][min(n2["n"], 2) - 1]
+gm2, _ = gm_script(adj_script, reply_wait_s=5, poll_interval_s=0.05)
+check("adjudicate skips duplicate bare pick then accepts the JSON",
+      gm2.adjudicate("look", {}, context={"game_guid": "g"}) == GOOD_Q)
+
+# compose_narrative skips JSON + bare picks, accepts prose.
+n3 = {"n": 0}
+def narr_script(payload):
+    n3["n"] += 1
+    return [STALE_ADJ, "earth-changing",
+            "The fog holds."][min(n3["n"], 3) - 1]
+gm3, _ = gm_script(narr_script, reply_wait_s=5, poll_interval_s=0.05)
+check("narrative skips JSON + bare pick, accepts prose",
+      gm3.compose_narrative("look", GOOD_Q, {}, "",
+                            context={"game_guid": "g"}) == "The fog holds.")
+
+# A genuinely wrong (non-JSON) pick still fails loudly — the gate only
+# skips JSON-shaped replies, it does not swallow roster misbehavior.
+err = raises_turn_failed(lambda: gm_script(
+    lambda j: "vampires")[0].pick_plot(["aliens"], context={}))
+check("off-roster non-JSON pick -> TurnFailed (not skipped)",
+      err is not None and "not on the §4.3 roster" in err)
+
+# A malformed adjudication still fails loudly — only bare roster names
+# are skipped, not bad JSON.
+err = raises_turn_failed(lambda: gm_script(
+    lambda j: "sure, the player can drink!")[0].adjudicate(
+        "x", {}, context={}))
+check("malformed adjudication -> TurnFailed (not skipped)",
+      err is not None and "not JSON" in err)
+
+# Only wrong-shaped replies inside the whole budget -> loud timeout
+# naming the call (the skip advances the cursor; it never spins
+# forever and never fails silently).
+gm4, _ = gm_script(lambda j: STALE_ADJ, reply_wait_s=0.2,
+                   poll_interval_s=0.05, reprompt_wait_s=0.05)
+err = raises_turn_failed(lambda: gm4.pick_plot(["aliens"], context={}))
+check("all replies wrong-shaped -> loud timeout, not silent",
+      err is not None and "no roster reply" in err and "pick_plot" in err)
 
 print(f"\nroster demo green — {len(checks)} checks, 0 FAILs.")

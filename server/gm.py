@@ -259,6 +259,53 @@ def _validate_questions(questions):
     return questions
 
 
+def _looks_like_json_object(body):
+    """True when body parses as a JSON dict/list — the adjudicate reply shape."""
+    try:
+        return isinstance(json.loads(body), (dict, list))
+    except (json.JSONDecodeError, ValueError):
+        return False
+
+
+def _accept_pick_plot(body):
+    """Reply-shape gate for pick_plot waits: skip JSON-shaped replies.
+
+    The keeper answers stale and duplicate calls (live 2026-09-30: a late
+    adjudicate JSON was consumed as a plot pick, failing the turn on "not
+    on the §4.3 roster"). A JSON dict/list is never a plot pick — it is an
+    answer to a different call — so skip it and keep waiting. Anything else
+    still goes through the roster-membership check, which fails loudly on
+    a genuinely wrong pick.
+    """
+    return not _looks_like_json_object(body.strip())
+
+
+def _accept_adjudicate(body):
+    """Reply-shape gate for adjudicate waits: skip bare roster names.
+
+    The keeper duplicates pick_plot answers (live 2026-09-30: a duplicate
+    "earth-changing" was consumed as the adjudication, failing JSON
+    parse). A bare roster name is never an adjudication — skip it and keep
+    waiting. Malformed JSON still fails loudly in adjudicate() via
+    _validate_questions.
+    """
+    return body.strip() not in PLOT_ROSTER
+
+
+def _accept_narrative(body):
+    """Reply-shape gate for compose_narrative waits: skip JSON-shaped
+    replies and bare roster names (answers to other calls)."""
+    s = body.strip()
+    return bool(s) and not _looks_like_json_object(s) and s not in PLOT_ROSTER
+
+
+_REPLY_ACCEPT = {
+    "pick_plot": _accept_pick_plot,
+    "adjudicate": _accept_adjudicate,
+    "compose_narrative": _accept_narrative,
+}
+
+
 class RosterGM(GameMaster):
     """Wraps the R4T `fogline-gm` roster behind the GameMaster interface.
 
@@ -266,7 +313,9 @@ class RosterGM(GameMaster):
     queues and returns — nothing comes back on stdout. So each call is
     send (`a8s tell fogline-gm '<envelope>'`) then wait on the game
     server's own a8s mailbox for keeper's reply (`from fogline-gm:keeper`,
-    correlated by send time since the server runs serial turns).
+    correlated by send time plus a per-call reply-shape gate — the keeper
+    answers stale and duplicate calls, so the first newer reply is not
+    necessarily the answer to this call).
 
     Production shape: the game server's tells go out from its own
     mailbox-only a8s node (default `atfl-server`; `node_name` + `node_root`
@@ -318,8 +367,9 @@ class RosterGM(GameMaster):
         self.node_root = node_root
         self.keeper_sender = keeper_sender
         # send_fn(envelope_json) -> None; poll_fn(timeout_s, since_iso)
-        # -> first unseen keeper reply body (str) or None. Injectable for
-        # hermetic tests; the real defaults shell out to `a8s`.
+        # -> [(utc_iso, body)] of keeper replies newer than since_iso,
+        # oldest first (possibly empty). Injectable for hermetic tests;
+        # the real defaults shell out to `a8s`.
         self.send_fn = send_fn or self._send_real
         self.poll_fn = poll_fn or self._poll_real
 
@@ -461,8 +511,9 @@ class RosterGM(GameMaster):
             time.sleep(min(1.0, remaining))
 
     def _poll_real(self, timeout_s, since_iso):
-        """One poll arm on the game server's mailbox node; returns the first
-        keeper reply newer than since_iso, or None.
+        """One poll arm on the game server's mailbox node; returns the
+        keeper replies newer than since_iso as [(utc, body)], oldest
+        first (possibly empty).
 
         Uses `a8s convo <node_name> --from <keeper> --json` — the game
         server's OWN mailbox node, because keeper replies to the inbound
@@ -478,7 +529,8 @@ class RosterGM(GameMaster):
         see _send_real's publish note and the ares bug report. One arm is
         a fast history read; `_call` re-arms every poll_interval_s until
         the reply wait deadline. Python-side sender + timestamp filtering
-        is the real correlation — `--from` is belt only."""
+        is the first correlation pass — `--from` is belt only; the
+        per-call reply-shape gate in `_wait` is the second."""
         if not self.node_root or not os.path.isdir(self.node_root):
             _turn_failed(
                 "RosterGM node_root is not set — register the game "
@@ -495,12 +547,16 @@ class RosterGM(GameMaster):
         return self._parse_tells(proc.stdout, since_iso)
 
     def _parse_tells(self, output, since_iso):
-        """Pull the first keeper reply body out of `a8s convo --json`:
+        """Pull keeper reply rows out of `a8s convo --json`:
         newline-delimited {ulid, seq, from, to, utc, content, ...} rows.
-        Accepts the first row sent by keeper *newer* than since_iso (both
-        UTC ISO, zero-padded — string comparison is chronological). None
-        when nothing arrived. Non-JSON lines are ignored."""
+        Returns [(utc, body)] for rows sent by keeper *newer* than
+        since_iso (both UTC ISO, zero-padded — string comparison is
+        chronological), oldest first. Non-JSON lines, other senders, and
+        empty bodies are ignored. Every candidate is returned (not just
+        the first) so `_wait` can skip a stale or duplicate reply to a
+        different call and still reach the right one."""
         want = self.keeper_sender.lower()
+        rows = []
         for line in output.splitlines():
             line = line.strip()
             if not line.startswith("{"):
@@ -511,12 +567,13 @@ class RosterGM(GameMaster):
                 continue
             if str(row.get("from", "")).lower() != want:
                 continue
-            if str(row.get("utc", "")) <= since_iso:
+            utc = str(row.get("utc", ""))
+            if utc <= since_iso:
                 continue
             body = (row.get("content") or "").strip()
             if body:
-                return body
-        return None
+                rows.append((utc, body))
+        return rows
 
     def _send(self, payload):
         from .turn_loop import TurnFailed  # lazy: turn_loop imports .gm
@@ -527,27 +584,48 @@ class RosterGM(GameMaster):
         except Exception as e:
             _turn_failed(f"roster send failed: {type(e).__name__}: {e}")
 
-    def _wait(self, sent_at, budget_s):
-        """Poll until a keeper reply newer than sent_at arrives, or the
-        budget exhausts. Returns the reply body, or None on timeout
-        (timeout is a soft signal here — the caller decides whether to
-        re-prompt or fail loudly)."""
+    def _wait(self, sent_at, budget_s, accept=None, call="?"):
+        """Poll until a keeper reply newer than sent_at arrives that passes
+        the accept(body) shape gate, or the budget exhausts. Returns the
+        reply body, or None on timeout (timeout is a soft signal here —
+        the caller decides whether to re-prompt or fail loudly).
+
+        Replies failing the gate are skipped with a log line and the
+        cursor advances past them: the keeper answers stale and duplicate
+        calls, so the first newer reply is not necessarily the answer to
+        this call (live 2026-09-30 — dryrun3: a late adjudicate reply was
+        consumed as a plot pick, and a duplicate plot pick as the
+        adjudication, failing two turns the keeper had actually answered).
+        Skipping by cursor (not by dropping) keeps a later correct reply
+        reachable; a genuinely malformed reply still fails loudly in the
+        call method's own validation, not here.
+        """
         from .turn_loop import TurnFailed  # lazy: turn_loop imports .gm
+        accept = accept or (lambda body: True)
+        cursor = sent_at
         deadline = time.monotonic() + budget_s
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
             try:
-                body = self.poll_fn(min(self.poll_interval_s, remaining),
-                                    sent_at)
+                rows = self.poll_fn(min(self.poll_interval_s, remaining),
+                                    cursor)
             except TurnFailed:
                 raise
             except Exception as e:
                 _turn_failed(
                     f"roster mailbox poll failed: {type(e).__name__}: {e}")
-            if body:
-                return body
+            for utc, body in rows or []:
+                if utc <= cursor:
+                    continue
+                cursor = utc
+                if accept(body):
+                    return body
+                print(f"[RosterGM] skip reply {utc} ({len(body)} chars) "
+                      f"waiting for {call}: wrong-shaped reply, "
+                      f"cursor advanced")
+            # loop until the deadline; the cursor only moves forward
 
     def _call(self, call, context, player_input="", questions=None,
               filtered=None, catchup=""):
@@ -559,7 +637,8 @@ class RosterGM(GameMaster):
             adjudication=questions if call == "compose_narrative" else None)
         self._send(json.dumps(envelope))
         sent_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        body = self._wait(sent_at, self.reply_wait_s)
+        accept = _REPLY_ACCEPT.get(call, lambda body: True)
+        body = self._wait(sent_at, self.reply_wait_s, accept, call)
         if body is None and self.reprompt_wait_s:
             # One bounded re-prompt before the loud failure: the
             # starved return leg may already exist on the roster side
@@ -568,7 +647,7 @@ class RosterGM(GameMaster):
             self._send(json.dumps(reprompt))
             # Keep the ORIGINAL sent_at: a late reply to the original
             # call arriving during the re-prompt wait is the reply.
-            body = self._wait(sent_at, self.reprompt_wait_s)
+            body = self._wait(sent_at, self.reprompt_wait_s, accept, call)
         if body is None:
             budget = (f"{self.reply_wait_s}s"
                       + (f" + {self.reprompt_wait_s}s re-prompt"
