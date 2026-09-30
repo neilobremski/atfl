@@ -136,11 +136,15 @@ ENVELOPE_KEYS = ("call", "game_guid", "turn_no", "game_clock",
 MAX_NARRATIVE_WORDS = 2000
 
 # Reply wait: the a8s transport is async, so a subprocess call budget is
-# meaningless here — wake latency is minutes-scale (observed 4.5 min
-# receipt-to-wake once, 15+ min while the idle pass held the wake slot).
-# The game server's poll cycle can send-and-return and pick the reply up
-# on a later cycle; RosterGM's blocking default covers the simpler case.
-REPLY_WAIT_S = 1800
+# meaningless here — keeper answer latency is tens-of-minutes scale.
+# Measured 2026-09-30 across three live pick_plot attempts: first keeper
+# replies landed 34, 50, and 69 min after the send (a fourth stale answer
+# at 143 min); all above the old 2100s total budget, so turns failed on
+# latency alone. The game plays at roughly an email a day, so a 2.5h
+# per-attempt budget is invisible to players; the poll cycle can
+# send-and-return and pick the reply up on a later cycle, and RosterGM's
+# blocking default covers the simpler case.
+REPLY_WAIT_S = 7200
 POLL_INTERVAL_S = 30
 
 # Re-prompt budget: after REPLY_WAIT_S elapses with no keeper reply, the
@@ -148,7 +152,7 @@ POLL_INTERVAL_S = 30
 # recovered the starved adjudicate return leg live — never reconstruct,
 # forward the already-produced artifact) and waits this long before
 # failing loudly via TurnFailed. None/0 disables the re-prompt.
-REPROMPT_WAIT_S = 300
+REPROMPT_WAIT_S = 1800
 
 # Sender attribution on keeper's replies (correction 3: keeper replies to
 # the inbound sender, so production sends come from the game server's own
