@@ -122,6 +122,15 @@ def _turn_failed(msg):
     raise TurnFailed(f"roster: {msg}")
 
 
+def _outbox_files(outbox_dir):
+    """Filenames of unreceipted outbox files (top-level *.json only —
+    .receipts/ holds published ones). Missing dir reads as empty."""
+    try:
+        return {f for f in os.listdir(outbox_dir) if f.endswith(".json")}
+    except OSError:
+        return set()
+
+
 # research/phase4-gm-integration.md: envelope key set. The roster must
 # never see anything outside these keys (no hidden_traits, no plot,
 # no ledger — enforced here, not by asking nicely).
@@ -153,6 +162,17 @@ POLL_INTERVAL_S = 30
 # forward the already-produced artifact) and waits this long before
 # failing loudly via TurnFailed. None/0 disables the re-prompt.
 REPROMPT_WAIT_S = 1800
+
+# Publish wait: after `a8s tell` records the outbox file, _send_real waits
+# this long for the node's daemon to publish it (file drained from the
+# outbox dir into .receipts) BEFORE running `a8s stop`. `a8s tell` only
+# *records* the file — the S3 publish is the daemon's asynchronous job —
+# so stopping the daemon first strands the tell silently in the outbox
+# (found live 2026-09-30: the stop's SIGTERM beat the daemon's first poll
+# tick by ~350ms; the pick_plot never published and the full 2h reply
+# wait burned on a call the keeper never received). The drain, not the
+# start's exit code, is the proof of publish.
+PUBLISH_WAIT_S = 120
 
 # Sender attribution on keeper's replies (correction 3: keeper replies to
 # the inbound sender, so production sends come from the game server's own
@@ -282,6 +302,7 @@ class RosterGM(GameMaster):
                  reply_wait_s=REPLY_WAIT_S,
                  poll_interval_s=POLL_INTERVAL_S,
                  reprompt_wait_s=REPROMPT_WAIT_S,
+                 publish_wait_s=PUBLISH_WAIT_S,
                  max_narrative_words=MAX_NARRATIVE_WORDS,
                  node_name="atfl-server",
                  node_root=None,
@@ -291,6 +312,7 @@ class RosterGM(GameMaster):
         self.reply_wait_s = reply_wait_s
         self.poll_interval_s = poll_interval_s
         self.reprompt_wait_s = reprompt_wait_s
+        self.publish_wait_s = publish_wait_s
         self.max_narrative_words = max_narrative_words
         self.node_name = node_name
         self.node_root = node_root
@@ -354,6 +376,8 @@ class RosterGM(GameMaster):
                 f"a8s tell would send from outbox {outbox!r}, outside "
                 f"node_root {node_root!r} — refusing to strand the keeper "
                 "reply in the wrong mailbox")
+        outbox_dir = os.path.join(node_root, ".outbox")
+        pending_before = _outbox_files(outbox_dir)
         try:
             start = subprocess.run(
                 [a8s, "start", self.node_name],
@@ -363,36 +387,78 @@ class RosterGM(GameMaster):
                 _turn_failed(f"a8s start {self.node_name} exited "
                              f"{start.returncode}: "
                              f"{start.stderr.strip()[:200]}")
+            published = False
             try:
                 proc = subprocess.run(
                     [a8s, "tell", self.roster_name, envelope_json],
                     capture_output=True, text=True, timeout=60,
                     cwd=self.node_root, env=child_env)
+                if proc.returncode != 0:
+                    _turn_failed(
+                        f"a8s tell exited {proc.returncode}: "
+                        f"{proc.stderr.strip()[:200]}")
+                # The daemon publishes asynchronously: `a8s tell` only
+                # *records* the outbox file, the S3 publish is the
+                # daemon's job. Wait for the drain BEFORE stopping the
+                # node — stopping first strands the tell silently in
+                # the outbox (found live 2026-09-30: the stop's SIGTERM
+                # beat the daemon's first poll tick by ~350ms, the
+                # pick_plot never published, and the full reply wait
+                # burned on a call the keeper never received). The
+                # drain — not `a8s start` exiting 0 — is the proof the
+                # keeper can see the call.
+                self._await_publish(outbox_dir, pending_before)
+                published = True
             finally:
                 # Stop failure is loud, not best-effort: a daemon left
                 # running races the reply poll and would silently starve
                 # the call (the whole reply_wait_s + re-prompt burn).
+                # Exception: when the publish never confirmed, the call
+                # has already failed loudly above — then stop runs
+                # best-effort so a dead ("not running") daemon can't
+                # mask the stranded-publish error with a misleading
+                # stop error.
                 try:
                     stop = subprocess.run(
                         [a8s, "stop", self.node_name],
                         capture_output=True, text=True, timeout=660,
                         env=child_env)
                 except subprocess.TimeoutExpired:
-                    _turn_failed(
-                        f"a8s stop {self.node_name} did not return within "
-                        "660s — the reply poll would race a live daemon")
-                if stop.returncode != 0:
-                    _turn_failed(
-                        f"a8s stop {self.node_name} exited "
-                        f"{stop.returncode}: "
-                        f"{stop.stderr.strip()[:200]} — the reply poll "
-                        "would race a live daemon")
-            if proc.returncode != 0:
-                _turn_failed(
-                    f"a8s tell exited {proc.returncode}: "
-                    f"{proc.stderr.strip()[:200]}")
+                    if published:
+                        _turn_failed(
+                            f"a8s stop {self.node_name} did not return "
+                            f"within 660s — the reply poll would race a "
+                            f"live daemon")
+                else:
+                    if stop.returncode != 0 and published:
+                        _turn_failed(
+                            f"a8s stop {self.node_name} exited "
+                            f"{stop.returncode}: "
+                            f"{stop.stderr.strip()[:200]} — the reply poll "
+                            f"would race a live daemon")
         except subprocess.TimeoutExpired:
             _turn_failed("a8s send sequence did not return within 60s")
+
+    def _await_publish(self, outbox_dir, pending_before):
+        """Block until the daemon publishes every outbox file recorded
+        after pending_before was snapshotted (the tell just sent drains
+        from the outbox dir into .receipts), or fail loudly after
+        publish_wait_s. No stop is attempted on timeout: the daemon is
+        dead or wedged, and the message names the stranded file so the
+        node can be investigated."""
+        deadline = time.monotonic() + self.publish_wait_s
+        while True:
+            pending = _outbox_files(outbox_dir) - pending_before
+            if not pending:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _turn_failed(
+                    f"roster tell recorded but not published within "
+                    f"{self.publish_wait_s}s (stranded in outbox: "
+                    f"{sorted(pending)[0][:48]}...) — the node daemon "
+                    f"may be dead; not stopping it, investigate the node")
+            time.sleep(min(1.0, remaining))
 
     def _poll_real(self, timeout_s, since_iso):
         """One poll arm on the game server's mailbox node; returns the first

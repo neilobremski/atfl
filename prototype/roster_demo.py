@@ -20,6 +20,8 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -528,6 +530,58 @@ calls, err = send_with_stub(gm12, tell_timeout_script)
 check("tell timeout -> TurnFailed naming the 60s send budget, stop still ran",
       err is not None and "60s" in err
       and [c[0][1] for c in calls] == ["tell", "start", "tell", "stop"])
+
+print("\n== 12b. publish-wait: the drain before the stop ==")
+# Live 2026-09-30: `a8s stop`'s SIGTERM beat the daemon's first poll tick
+# by ~350ms, so the tell sat stranded in the outbox (recorded, never
+# published) and the full 2h reply wait burned on a call the keeper never
+# received. _send_real now waits for the outbox drain before stopping.
+os.makedirs(os.path.join(ROOT, ".outbox"), exist_ok=True)
+
+
+def strand_script(argv, kwargs):
+    """--check ok; the real tell records an outbox file the (dead)
+    daemon never publishes; everything else succeeds."""
+    if argv[1:3] == ["tell", "--check"]:
+        return (0, f"tell: ok\n  outbox: {ROOT}/.outbox\n", "")
+    if argv[1] == "tell" and len(argv) > 3:
+        with open(os.path.join(ROOT, ".outbox", "01STRANDED.json"),
+                  "w") as f:
+            f.write(argv[3])
+    return (0, "", "")
+
+
+gm_strand = RosterGM(node_root=ROOT, publish_wait_s=0.3)
+calls, err = send_with_stub(gm_strand, strand_script)
+check("stranded outbox file -> TurnFailed naming the publish, not the stop",
+      err is not None and "not published" in err and "01STRANDED" in err
+      and "a8s stop" not in err)
+check("stop still runs best-effort on stranded publish (no masking)",
+      [c[0][1] for c in calls] == ["tell", "start", "tell", "stop"])
+os.unlink(os.path.join(ROOT, ".outbox", "01STRANDED.json"))
+
+
+def drain_mid_wait():
+    """A file the daemon drains mid-wait must not trip the timeout."""
+    d = tempfile.mkdtemp(prefix="atfl-pubwait-")
+    target = os.path.join(d, "01DAEMON.json")
+    with open(target, "w") as f:
+        f.write("{}")
+    gm_w = RosterGM(node_root=d, publish_wait_s=5)
+    t = threading.Thread(
+        target=lambda: (time.sleep(0.2), os.unlink(target)))
+    t.start()
+    try:
+        gm_w._await_publish(d, set())
+    finally:
+        t.join()
+
+
+check("publish wait returns once the daemon drains the outbox",
+      raises_turn_failed(drain_mid_wait) is None)
+check("publish_wait_s defaults to the measured constant",
+      RosterGM().publish_wait_s == gm_mod.PUBLISH_WAIT_S
+      and gm_mod.PUBLISH_WAIT_S == 120)
 calls, err = send_with_stub(RosterGM(), ok_script)  # node_root unset
 check("missing node_root -> TurnFailed before any subprocess runs",
       err is not None and "node_root" in err and calls == [])
