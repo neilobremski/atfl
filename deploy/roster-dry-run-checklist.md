@@ -76,6 +76,12 @@ opencode works with no login on the free path (verified 2026-09-28).
    row counts, and a denylist leak check against both rendered emails.
    `dry run: PASS` is the gate for step 3; `FAIL` prints which side
    broke (missing roster / failed outcome / leak hits).
+   Crash resume: if the host dies mid-run (the keeper's reply waits are
+   hours long), re-run with `--resume [GUID]` — it re-attaches to the
+   in-flight roster call recorded in `<GUID>.pending.json` instead of
+   re-sending it, and the turn loop skips the steps the dead attempt
+   already recorded. Never `--resume` while the original process is
+   still alive.
 3. Seed a scratch game for the operator's own address only
    (`server/seed.py fog-line-mystery-v1`), so no outsider ever sees a turn.
 4. Let one poll cycle produce turn 1. Watch the log:

@@ -356,6 +356,7 @@ class RosterGM(GameMaster):
                  node_name="atfl-server",
                  node_root=None,
                  keeper_sender=KEEPER_SENDER,
+                 pending_dir=None,
                  send_fn=None, poll_fn=None):
         self.roster_name = roster_name
         self.reply_wait_s = reply_wait_s
@@ -366,6 +367,13 @@ class RosterGM(GameMaster):
         self.node_name = node_name
         self.node_root = node_root
         self.keeper_sender = keeper_sender
+        # pending_dir: when set, every roster call records its in-flight
+        # state (<game_guid>.pending.json) after the publish confirms, and
+        # a later process re-attaches to the ORIGINAL send instead of
+        # re-sending (crash resume — see _call). The file is deleted when
+        # the reply is consumed or the call fails loudly. None disables
+        # the tracking (hermetic tests, mock-adjacent uses).
+        self.pending_dir = pending_dir
         # send_fn(envelope_json) -> None; poll_fn(timeout_s, since_iso)
         # -> [(utc_iso, body)] of keeper replies newer than since_iso,
         # oldest first (possibly empty). Injectable for hermetic tests;
@@ -627,32 +635,108 @@ class RosterGM(GameMaster):
                       f"cursor advanced")
             # loop until the deadline; the cursor only moves forward
 
+    def _pending_path(self, game_guid):
+        """Path of the in-flight-call record for this game, or None when
+        pending tracking is disabled (pending_dir=None)."""
+        if not self.pending_dir or not game_guid:
+            return None
+        return os.path.join(self.pending_dir, f"{game_guid}.pending.json")
+
+    def _load_pending(self, game_guid, call, turn_no):
+        """A resumed in-flight call for this exact (call, turn_no), or None.
+        Anything else — a missing/unparseable file, or a record for a
+        different call — reads as 'nothing pending' so the caller sends
+        fresh."""
+        path = self._pending_path(game_guid)
+        if not path:
+            return None
+        try:
+            with open(path) as f:
+                p = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if (p.get("call") == call and p.get("turn_no") == turn_no
+                and p.get("sent_at")):
+            return p
+        return None
+
+    def _write_pending(self, game_guid, call, turn_no, sent_at,
+                       reprompted=False):
+        """Record the in-flight call atomically (write + rename). Written
+        AFTER the publish confirms, so a file always means the keeper can
+        see the call. reprompted=True marks that the one re-prompt budget
+        is already spent — a resumed wait must not spend it twice."""
+        path = self._pending_path(game_guid)
+        if not path:
+            return
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"call": call, "game_guid": game_guid,
+                       "turn_no": turn_no, "sent_at": sent_at,
+                       "reprompted": reprompted,
+                       "written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                   time.gmtime())}, f)
+        os.replace(tmp, path)
+
+    def _clear_pending(self, game_guid):
+        """The call is over (reply consumed, or failed loudly) — a later
+        run must send fresh, never re-attach to this send."""
+        path = self._pending_path(game_guid)
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
     def _call(self, call, context, player_input="", questions=None,
               filtered=None, catchup=""):
         ctx = context or {}
+        game_guid = ctx.get("game_guid", "")
+        turn_no = ctx.get("turn_no", 0)
         envelope = build_envelope(
-            call, ctx.get("game_guid", ""), ctx.get("turn_no", 0),
+            call, game_guid, turn_no,
             ctx.get("game_clock", ""), player_input,
             filtered or {}, PLOT_ROSTER, catchup,
             adjudication=questions if call == "compose_narrative" else None)
-        self._send(json.dumps(envelope))
-        sent_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        pending = self._load_pending(game_guid, call, turn_no)
+        if pending is not None:
+            # Crash resume: this envelope went out before the process died
+            # (the pending file is only written after the publish drain
+            # confirms). Do NOT re-send — a duplicate call would put two
+            # same-shaped answers in the keeper's thread and re-arm the
+            # stale-answer misattribution the shape gates defend against.
+            # Re-attach to the original send; the wait correlates on the
+            # original sent_at, so a reply that landed while we were dead
+            # is consumed on the first poll arm.
+            sent_at = pending["sent_at"]
+            reprompted = bool(pending.get("reprompted"))
+            print(f"[RosterGM] resume {call} game {game_guid[:8]} turn "
+                  f"{turn_no}: re-attaching to send at {sent_at}, no re-send")
+        else:
+            self._send(json.dumps(envelope))
+            sent_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            reprompted = False
+            self._write_pending(game_guid, call, turn_no, sent_at)
         accept = _REPLY_ACCEPT.get(call, lambda body: True)
         body = self._wait(sent_at, self.reply_wait_s, accept, call)
-        if body is None and self.reprompt_wait_s:
+        if body is None and self.reprompt_wait_s and not reprompted:
             # One bounded re-prompt before the loud failure: the
             # starved return leg may already exist on the roster side
             # (session #37 — the artifact was produced but never sent).
             reprompt = build_reprompt_envelope(envelope)
             self._send(json.dumps(reprompt))
+            self._write_pending(game_guid, call, turn_no, sent_at,
+                               reprompted=True)
             # Keep the ORIGINAL sent_at: a late reply to the original
             # call arriving during the re-prompt wait is the reply.
             body = self._wait(sent_at, self.reprompt_wait_s, accept, call)
         if body is None:
             budget = (f"{self.reply_wait_s}s"
                       + (f" + {self.reprompt_wait_s}s re-prompt"
-                         if self.reprompt_wait_s else ""))
+                         if self.reprompt_wait_s and not reprompted else ""))
+            self._clear_pending(game_guid)
             _turn_failed(f"no roster reply within {budget} for {call}")
+        self._clear_pending(game_guid)
         return body
 
     def pick_plot(self, roster, context=None):

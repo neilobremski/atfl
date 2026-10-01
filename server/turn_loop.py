@@ -196,7 +196,16 @@ class TurnResult:
 
 def run_turn(db, player_input, gm, turn_len_min=60):
     """Run one full turn against an open game DB (status 'active').
-    Serial per game — the caller must hold the game's lock (§2.2)."""
+    Serial per game — the caller must hold the game's lock (§2.2).
+
+    Crash resume: a process killed mid-turn (host reboot/replacement —
+    the roster GM's waits are hours long) leaves this turn's row with a
+    NULL narrative and all of the attempt's writes uncommitted. The next
+    run_turn for the same turn reuses that row and skips every step whose
+    result is already recorded (plot pick, adjudication, narrative), while
+    the RosterGM re-attaches to the in-flight call instead of re-sending
+    it (see gm.RosterGM's pending file). A re-derived step always
+    re-runs: uncommitted work is gone by construction."""
     g = dict(db.execute("SELECT * FROM games").fetchone())
     if g["status"] != "active":
         raise TurnFailed(f"game {g['guid']} is {g['status']}; no turns run")
@@ -208,17 +217,37 @@ def run_turn(db, player_input, gm, turn_len_min=60):
            "game_clock": game_clock_label(clock_start)}
     now = datetime.now(timezone.utc).isoformat()
 
-    turn_id = db.execute(
-        "INSERT INTO turns (game_guid,turn_no,game_time_start_min,game_time_len_min,player_input,created_at)"
-        " VALUES (?,?,?,?,?,?)",
-        (g["guid"], turn_no, clock_start, turn_len_min, player_input, now)).lastrowid
+    open_row = db.execute(
+        "SELECT * FROM turns WHERE game_guid=? AND turn_no=? ORDER BY id DESC",
+        (g["guid"], turn_no)).fetchone()
+    if open_row is not None and open_row["narrative"] is None:
+        # An earlier attempt died mid-turn: reuse its row (re-running
+        # would insert a second row for the same turn, and the §2.6 retry
+        # path below hits this branch too — one row per turn, always).
+        # The schema defaults mutation_questions to '[]', so "adjudicated"
+        # means a real non-empty question list, not the default.
+        turn_id = open_row["id"]
+        done = {"plot": bool(g["plot_concept"]),
+                "adjudicated": bool(json.loads(
+                    open_row["mutation_questions"] or "[]")),
+                "narrated": False}  # narrative NULL by the branch condition
+        print(f"[turn_loop] resuming turn {turn_no} (row {turn_id}): "
+              f"plot={'done' if done['plot'] else 'pending'}, "
+              f"adjudication={'done' if done['adjudicated'] else 'pending'}")
+    else:
+        turn_id = db.execute(
+            "INSERT INTO turns (game_guid,turn_no,game_time_start_min,game_time_len_min,player_input,created_at)"
+            " VALUES (?,?,?,?,?,?)",
+            (g["guid"], turn_no, clock_start, turn_len_min, player_input, now)).lastrowid
+        done = {"plot": False, "adjudicated": False, "narrated": False}
 
     # 1. gather — elapsed-time reconciliation first, then filtered view
     reconcile_log = reconcile_elapsed_time(db, turn_id, turn_no)
     filtered = filtered_view(db, g["guid"])
 
-    # 1b. turn-1 plot pick (§3.3.2 / §4.1): game-level mutation, never changed
-    if turn_no == 1:
+    # 1b. turn-1 plot pick (§3.3.2 / §4.1): game-level mutation, never changed.
+    # Skipped on crash resume when a previous attempt already recorded it.
+    if turn_no == 1 and not done["plot"]:
         pick = gm.pick_plot(PLOT_ROSTER, context=ctx)
         assert pick in PLOT_ROSTER, f"plot pick {pick!r} not on the §4.3 roster"
         db.execute("UPDATE games SET plot_concept=? WHERE guid=?", (pick, g["guid"]))
@@ -233,13 +262,22 @@ def run_turn(db, player_input, gm, turn_len_min=60):
         (g["guid"], turn_no)).fetchone()[0]
     catchup = build_catchup(db, g["guid"], turn_no, last_real or 0)
 
-    # 2. yes/no mutations
-    t0 = time.perf_counter()
-    questions = gm.adjudicate(player_input, filtered, context=ctx)
-    adjudicate_ms = (time.perf_counter() - t0) * 1000.0
-    if not questions:
-        raise TurnFailed("GM produced no adjudication output")
-    db.execute("UPDATE turns SET mutation_questions=? WHERE id=?", (_j(questions), turn_id))
+    # 2. yes/no mutations. On crash resume the adjudication is re-derived
+    # (the previous attempt's was never committed); on a §2.6 in-process
+    # retry the validated questions survive in the reused row and are NOT
+    # re-sent to the roster.
+    if done["adjudicated"]:
+        questions = json.loads(open_row["mutation_questions"])
+        adjudicate_ms = None
+        print(f"[turn_loop] reusing validated adjudication "
+              f"({len(questions)} question(s)) from the failed attempt")
+    else:
+        t0 = time.perf_counter()
+        questions = gm.adjudicate(player_input, filtered, context=ctx)
+        adjudicate_ms = (time.perf_counter() - t0) * 1000.0
+        if not questions:
+            raise TurnFailed("GM produced no adjudication output")
+        db.execute("UPDATE turns SET mutation_questions=? WHERE id=?", (_j(questions), turn_id))
     for qd in questions:
         if qd["answer"] == "yes" and qd["effect"]:
             for target, changes in qd["effect"].items():

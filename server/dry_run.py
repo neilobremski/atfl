@@ -26,28 +26,39 @@ Flags:
     --cleanup       delete the scratch game DB at the end, printing the
                     final report first. Off by default so the operator
                     can inspect the DB afterwards.
+    --resume [GUID] resume a dry run killed mid-turn (host reboot /
+                    replacement): re-attaches to the in-flight roster
+                    call recorded in <GUID>.pending.json instead of
+                    re-sending it, and run_turn skips the steps the dead
+                    attempt already recorded. With no GUID, exactly one
+                    pending file must exist in the games dir. Only resume
+                    AFTER the original process is confirmed dead — two
+                    live drivers on one game will double-apply turns.
 
 Exit codes: 0 = dry run finished and reported; 1 = a turn failed or the
 leak check tripped (the report says which); 2 = startup/config refused.
 """
 
 import argparse
+import json
 import logging
 import os
 import sqlite3
 import sys
 
 from . import config, dispatch
+from .dispatch import _turn_outcome, get_lock
 from .gm import MockGM, RosterGM
 from .turn_loop import _denylist
 
 log = logging.getLogger("atfl.dry_run")
 
 
-def _build_gm(cfg):
+def _build_gm(cfg, pending_dir=None):
     if cfg["gm"] == "roster":
         return RosterGM(node_name=cfg["a8s_node"],
-                        node_root=cfg["a8s_node_root"])
+                        node_root=cfg["a8s_node_root"],
+                        pending_dir=pending_dir)
     return MockGM()
 
 
@@ -82,6 +93,116 @@ def _turn_report(tag, outcome, db, guid):
     return hits
 
 
+def _resume(args, cfg, games_dir, gm, email):
+    """Resume a dry run killed mid-turn. The pending file names the crashed
+    game and turn; _turn_outcome -> run_turn reuses the dead attempt's open
+    turn row, and the RosterGM re-attaches to the recorded in-flight call
+    instead of re-sending it. A resumed turn 1 that completes continues
+    into a fresh turn 2, mirroring the normal flow."""
+    pendings = sorted(f for f in os.listdir(games_dir)
+                      if f.endswith(".pending.json"))
+    want = args.resume if isinstance(args.resume, str) else None
+    if want:
+        name = f"{want.strip().lower()}.pending.json"
+        if name not in pendings:
+            print(f"no pending file for GUID {want} in {games_dir}")
+            return 2
+        pendings = [name]
+    elif len(pendings) != 1:
+        print(f"--resume needs exactly one <guid>.pending.json in "
+              f"{games_dir}; found {len(pendings)}"
+              + (f": {', '.join(p[:-13] for p in pendings)}" if pendings
+                 else "") + " — pass a GUID to choose.")
+        return 2
+    pending_path = os.path.join(games_dir, pendings[0])
+    try:
+        with open(pending_path) as f:
+            pending = json.load(f)
+    except (OSError, ValueError) as e:
+        print(f"cannot read {pending_path}: {e}")
+        return 2
+    guid, turn_no = pending["game_guid"], pending["turn_no"]
+    print(f"resuming game {guid} turn {turn_no} "
+          f"(in-flight call: {pending['call']}, sent {pending['sent_at']})")
+    db_path = os.path.join(games_dir, f"{guid}.db")
+    if not os.path.isfile(db_path):
+        print(f"game DB missing: {db_path} — nothing to resume")
+        return 2
+    db = sqlite3.connect(db_path)
+    db.row_factory = sqlite3.Row
+    game = db.execute("SELECT * FROM games WHERE guid=?", (guid,)).fetchone()
+    if game is None:
+        print(f"no game row for {guid} — nothing to resume")
+        db.close()
+        return 2
+    sender = game["player_email"]
+    if sender != email:
+        print(f"(note: game belongs to {sender}; using the game's address)")
+
+    def run_crashed_turn(tag, player_input):
+        try:
+            with get_lock(guid):
+                outcome = _turn_outcome(db, sender, gm, player_input, guid,
+                                        cfg["turn_len_min"])
+        except Exception as e:
+            print(f"\n{tag} CRASHED before an outcome: "
+                  f"{type(e).__name__}: {e}")
+            return None
+        return outcome
+
+    leaks = []
+    outcomes = []
+    if turn_no == 1:
+        outcome1 = run_crashed_turn("turn 1 (signup, resumed)",
+                                    args.signup_body)
+        if outcome1 is None:
+            db.close()
+            return 1
+        leaks += _turn_report("turn 1 (signup, resumed)", outcome1, db, guid)
+        outcomes.append(outcome1)
+        if outcome1.action != "turn_email":
+            print("\nresumed turn 1 did not complete; turn 2 not started")
+            db.close()
+            return 1
+        # The crashed turn is over: its in-flight call either completed
+        # (RosterGM._call clears the file) or never went through a
+        # pending-tracking GM (mock). Either way the record is stale now —
+        # a fresh turn 2 must not trip over it.
+        try:
+            os.remove(pending_path)
+        except OSError:
+            pass
+        next_turn_no = 2
+    elif turn_no == 2:
+        next_turn_no = 2
+    else:
+        print(f"unexpected crashed turn_no {turn_no}; not resuming")
+        db.close()
+        return 2
+
+    if next_turn_no == 2 and (turn_no == 2 or outcomes):
+        body2 = f"{args.followup}\n\n[guid:{guid}]"
+        tag = "turn 2 (follow-up, resumed)" if turn_no == 2 else "turn 2 (follow-up)"
+        outcome2 = run_crashed_turn(tag, body2)
+        if outcome2 is None:
+            db.close()
+            return 1
+        leaks += _turn_report(tag, outcome2, db, guid)
+        outcomes.append(outcome2)
+        if outcome2.action == "turn_email":
+            try:
+                os.remove(pending_path)
+            except OSError:
+                pass
+    db.close()
+
+    ok = all(o.action == "turn_email" for o in outcomes) and not leaks
+    print(f"\nscratch guid : {guid}")
+    print(f"scratch db   : {db_path}")
+    print(f"dry run (resumed): {'PASS' if ok else 'FAIL'}")
+    return 0 if ok else 1
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Dry-run a two-turn scratch game.")
     ap.add_argument("--email", required=True,
@@ -95,6 +216,10 @@ def main(argv=None):
                     help="override ATFL_GAMES_DIR for the scratch DB")
     ap.add_argument("--cleanup", action="store_true",
                     help="delete the scratch game DB after the report")
+    ap.add_argument("--resume", nargs="?", const=True, default=False,
+                    metavar="GUID",
+                    help="resume a crashed dry run (see module docstring); "
+                         "optional GUID selects among several pending files")
     args = ap.parse_args(argv)
 
     email = args.email.strip().lower()
@@ -106,11 +231,14 @@ def main(argv=None):
 
     games_dir = args.games_dir or cfg["games_dir"]
     os.makedirs(games_dir, exist_ok=True)
-    gm = _build_gm(cfg)
+    gm = _build_gm(cfg, pending_dir=games_dir)
     print(f"GM backend   : {type(gm).__name__} (ATFL_GM={cfg['gm']})")
     print(f"games dir    : {games_dir}")
     print(f"scratch player: {email}")
     print("(no mail is sent by this tool; turn emails are rendered only)")
+
+    if args.resume:
+        return _resume(args, cfg, games_dir, gm, email)
 
     # Turn 1 — the signup path, exactly as a real first email would take it.
     try:
