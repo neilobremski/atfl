@@ -367,6 +367,12 @@ class GeminiImageProvider:
 # Model IDs pinned at the research decision (phase3-hf-colab-art.md).
 # Same churn caveat as the Gemini IDs: these move fast; a swap is a
 # constructor-arg / config-layer change, and no demo pins model behavior.
+# 2026-10-01: the hf-inference ROUTE below is dead for these models (410
+# "deprecated and no longer supported by provider hf-inference"); the Hub
+# API maps FLUX.1-schnell live to nscale/fal-ai/wavespeed instead. Do NOT
+# rewrite this adapter until a provider route returns a verified 200 with
+# real image bytes — see research/phase3-hf-colab-art.md addendum
+# 2026-10-01. Retest from free-micro-1 (nscale hangs from the sandbox).
 HF_SCENE_MODEL = "black-forest-labs/FLUX.1-schnell"
 HF_SELFIE_MODEL = "black-forest-labs/FLUX.1-Kontext-dev"
 HF_INFERENCE_BASE = ("https://router.huggingface.co/hf-inference/"

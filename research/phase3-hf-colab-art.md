@@ -104,3 +104,39 @@ Neil's suggested path: run local open models in Colab's cloud, no spend.
   otherwise we fall back to plain image-to-image or the Colab notebook).
 - w2-browser sign-in is NOT needed yet — only if the Colab fallback is
   ever exercised.
+
+## Addendum 2026-10-01 — the `hf-inference` free route is dead for image models; provider routing is the path
+
+**What changed:** `POST https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell`
+now returns **410 "deprecated and no longer supported by provider hf-inference"** (first observed
+2026-09-30; FLUX.1-dev, SDXL-base-1.0 identical; Qwen-Image returns 400 "not supported by provider
+hf-inference"). The design above assumed the `hf-inference` route serves these models free forever —
+that assumption no longer holds. Model IDs pinned in `server/images.py` (FLUX.1-schnell,
+FLUX.1-Kontext-dev) are still the right models; only the ROUTE changed.
+
+**Where image generation lives now (verified 2026-10-01 via the Hub API, not just docs):**
+`GET https://huggingface.co/api/models/black-forest-labs/FLUX.1-schnell?expand=inferenceProviderMapping`
+returns live mappings: **nscale: live, fal-ai: live, wavespeed: live** (together/deepinfra: error).
+The router serves providers at `https://router.huggingface.co/<provider>/models/<model>` and nscale
+additionally exposes an OpenAI-compatible shape at
+`https://router.huggingface.co/nscale/v1/images/generations`
+(`{"model": "...", "prompt": "...", "response_format": "b64_json"}`).
+
+**Blocker found in the sandbox:** from this VM, ALL nscale routes hang — `/nscale/v1/images/generations`
+(120s, even for deliberately invalid requests) and `/nscale/models/...` (60s). Meanwhile
+`hf-inference/...` (fast 410s) and `huggingface.co/api/...` (fast 200s) answer normally, so this is
+nscale-specific, not a general egress failure. fal-ai/wavespeed provider-prefix probes were attempted
+2026-10-01 (see progress log session #65 for the outcome).
+
+**Cost note (unverified, from a third-party integration doc 2026-10-01):** Inference Providers bill
+against the HF account; free tier reportedly includes $0.10/month in inference credits. At ~60
+scene+selfie images/month this may not stay at $0 — verify the actual credit policy before wiring
+this into the daily turn loop. Neil's "no costs up front" directive stands; this needs his awareness
+in a digest before the image path goes live, not just a code change.
+
+**Next step:** retest the nscale (or fal-ai/wavespeed) route from free-micro-1, whose egress differs
+from the sandbox and which is the actual `ATFL_IMAGES=hf` deploy target. Only after a 200 with real
+image bytes does `HFImageProvider` get its REST-contract rewrite (current `{"inputs": ...}` shape is
+the dead `hf-inference` contract; the provider routes use the OpenAI-compatible shape). Do NOT
+rewrite the adapter blind — the hermetic `request_fn` convention exists precisely so the contract
+can be pinned against a verified live response.
