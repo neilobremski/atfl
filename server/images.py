@@ -22,6 +22,7 @@ the plot concept). The map panel is code-drawn from DB truth
 composite bytes are recorded in the `assets` table, so a weird image is
 reproducible from the game archive.
 """
+from __future__ import annotations  # py3.9 compat: `X | None` annotations stay lazy on the deploy target (OL9 stock python3.9)
 import hashlib
 import io
 import json
