@@ -446,7 +446,7 @@ check("hf scene body is the OpenAI-compatible shape",
       hpayload == {"model": HF_SCENE_MODEL, "prompt": "mist on the ridge",
                    "response_format": "b64_json"})
 check("scene model is FLUX.1-schnell", HF_SCENE_MODEL == "black-forest-labs/FLUX.1-schnell")
-check("selfie model is Kontext-dev", HF_SELFIE_MODEL == "black-forest-labs/FLUX.1-Kontext-dev")
+check("selfie model is FLUX.1-schnell (Kontext-dev 400s on all provider routes; verified 2026-10-01)", HF_SELFIE_MODEL == "black-forest-labs/FLUX.1-schnell")
 
 seen_hf2 = []
 hp2 = HFImageProvider("hf_test", request_fn=_hf_ok_transport(seen_hf2))
