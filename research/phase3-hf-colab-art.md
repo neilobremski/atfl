@@ -134,9 +134,18 @@ scene+selfie images/month this may not stay at $0 — verify the actual credit p
 this into the daily turn loop. Neil's "no costs up front" directive stands; this needs his awareness
 in a digest before the image path goes live, not just a code change.
 
-**Next step:** retest the nscale (or fal-ai/wavespeed) route from free-micro-1, whose egress differs
-from the sandbox and which is the actual `ATFL_IMAGES=hf` deploy target. Only after a 200 with real
-image bytes does `HFImageProvider` get its REST-contract rewrite (current `{"inputs": ...}` shape is
-the dead `hf-inference` contract; the provider routes use the OpenAI-compatible shape). Do NOT
-rewrite the adapter blind — the hermetic `request_fn` convention exists precisely so the contract
-can be pinned against a verified live response.
+**Next step — DONE 2026-10-01 11:07 session:** retested from free-micro-1
+(the actual `ATFL_IMAGES=hf` deploy target) over the Tailscale SSH path:
+`POST https://router.huggingface.co/nscale/v1/images/generations`
+`{"model": "black-forest-labs/FLUX.1-schnell", "prompt": "...",
+"response_format": "b64_json"}` → **200** with
+`{"created": 1790878126, "data": [{"b64_json": "<1.15MB base64 PNG>"}]}` —
+real 1024x1024 PNG bytes (goal hidden_files/hf_first_test_image.png, the
+first real test image). `HFImageProvider`'s REST contract rewritten against
+this verified response in server/images.py (commit this session); the demo's
+hermetic section 13 now pins the OpenAI-compatible shape and passes.
+Note: this egress quirk is now two-sided — the sandbox egress hangs nscale
+routes while free-micro-1 answers normally, and the
+`/hf-inference/models/<dummy>` probe from free-micro-1 returned 401 instead
+of the 410 the sandbox sees (route churn; irrelevant, the working route is
+the nscale one).

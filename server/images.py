@@ -367,16 +367,20 @@ class GeminiImageProvider:
 # Model IDs pinned at the research decision (phase3-hf-colab-art.md).
 # Same churn caveat as the Gemini IDs: these move fast; a swap is a
 # constructor-arg / config-layer change, and no demo pins model behavior.
-# 2026-10-01: the hf-inference ROUTE below is dead for these models (410
-# "deprecated and no longer supported by provider hf-inference"); the Hub
-# API maps FLUX.1-schnell live to nscale/fal-ai/wavespeed instead. Do NOT
-# rewrite this adapter until a provider route returns a verified 200 with
-# real image bytes — see research/phase3-hf-colab-art.md addendum
-# 2026-10-01. Retest from free-micro-1 (nscale hangs from the sandbox).
+# 2026-10-01: the `hf-inference` route is DEAD for these models (410
+# "deprecated and no longer supported by provider hf-inference"). The Hub API
+# maps FLUX.1-schnell live to nscale/fal-ai/wavespeed. Provider route
+# VERIFIED LIVE 2026-10-01 from free-micro-1 (the actual deploy target):
+# POST https://router.huggingface.co/nscale/v1/images/generations with
+# {"model": ..., "prompt": ..., "response_format": "b64_json"} returned 200
+# with {"created": int, "data": [{"b64_json": "<base64 png>"}]} — real
+# 1024x1024 PNG bytes (see goal hidden_files/hf_first_test_image.png).
+# NOTE: the nscale routes hang from the sandbox egress (verified 2026-10-01),
+# so re-verify if the deploy egress ever changes.
 HF_SCENE_MODEL = "black-forest-labs/FLUX.1-schnell"
 HF_SELFIE_MODEL = "black-forest-labs/FLUX.1-Kontext-dev"
-HF_INFERENCE_BASE = ("https://router.huggingface.co/hf-inference/"
-                     "models/{model}")
+HF_PROVIDER_BASE = ("https://router.huggingface.co/nscale/v1/"
+                    "images/generations")
 
 # Kontext-dev repo access on HF requires accepting its license conditions
 # (one-time account action on whoever holds the token). If that blocks,
@@ -398,17 +402,20 @@ class HFImageProvider:
       images never fail a turn, rate-limiting degrades to text-only
       immediately. Any other non-200 surfaces loudly as ImageError.
     - Scene = text-to-image via HF_SCENE_MODEL. Selfie = the selfie
-      model with the character ref (the stored first-selfie JPEG)
-      passed as a base64 image alongside the instruction — Kontext-dev
-      is an instruction-based editing model, so the ref keeps subject
-      identity consistent across turns with no finetuning.
+      model with an instruction-prefixed prompt; plain text-to-image for
+      now (Kontext-dev accepts raw prompts). The reference-photo
+      instruction-editing shape for subject continuity is NOT yet
+      verified on this route, so character_ref is accepted for API
+      compatibility but unused — selfie continuity via image-editing
+      waits on a verified edits contract.
     - `request_fn(url, headers, body_bytes) -> (status, raw_bytes)` is
       injectable so the demo pins the REST contract without network.
-    - LIVE CHECK OWED: the exact provider-side JSON shape for Kontext-dev
-      on the free inference tier must be verified against the real
-      endpoint once the token exists (research/phase3-hf-colab-art.md).
-      The contract below is pinned hermetically; correct it live if the
-      provider disagrees. Do NOT call it without the token.
+    - REST contract VERIFIED LIVE 2026-10-01 from free-micro-1 (see
+      module constants): OpenAI-compatible POST to HF_PROVIDER_BASE,
+      {"model", "prompt", "response_format": "b64_json"}; 200 returns
+      {"created": int, "data": [{"b64_json": "<png>"}]}. A response that
+      doesn't match raises ImageError loudly — no shape guessing.
+      Do NOT call it without the token.
     """
 
     def __init__(self, hf_token, *, scene_model=HF_SCENE_MODEL,
@@ -429,22 +436,21 @@ class HFImageProvider:
 
     def generate_scene(self, prompt: str, *, size: int = 1024) -> bytes:
         return self._generate(self._scene_model,
-                              {"inputs": prompt}, size=size)
+                              {"model": self._scene_model,
+                               "prompt": prompt,
+                               "response_format": "b64_json"})
 
     def generate_selfie(self, prompt: str, *, character_ref: bytes,
                         size: int = 1024) -> bytes:
         instruction = ("Keep the SAME person as in the reference photo "
                        "(same face, same hiker, same look); " + prompt)
-        if character_ref:
-            # Instruction-based editing call: ref image + instruction.
-            # Shape pinned hermetically; verify live once the token
-            # exists (see class docstring).
-            body = {"inputs": instruction,
-                    "image": base64.b64encode(character_ref).decode()}
-        else:
-            # No ref stored yet (first selfie): plain text-to-image.
-            body = {"inputs": instruction}
-        return self._generate(self._selfie_model, body, size=size)
+        # character_ref is reserved (see class docstring): the image-editing
+        # shape is unverified on this route, so we do plain text-to-image
+        # with the instruction prompt only.
+        return self._generate(self._selfie_model,
+                              {"model": self._selfie_model,
+                               "prompt": instruction,
+                               "response_format": "b64_json"})
 
     # -- REST plumbing --
 
@@ -457,8 +463,7 @@ class HFImageProvider:
         except urllib.error.HTTPError as e:
             return e.code, e.read()
 
-    def _generate(self, model: str, payload: dict, *, size: int) -> bytes:
-        url = HF_INFERENCE_BASE.format(model=model)
+    def _generate(self, model: str, payload: dict) -> bytes:
         headers = {"Content-Type": "application/json",
                    "Authorization": f"Bearer {self._hf_token}"}
         body = json.dumps(payload).encode()
@@ -466,7 +471,8 @@ class HFImageProvider:
         last = None
         for attempt in (1, 2):
             try:
-                status, raw = self._request_fn(url, headers, body)
+                status, raw = self._request_fn(HF_PROVIDER_BASE, headers,
+                                               body)
             except (urllib.error.URLError, socket.timeout, TimeoutError,
                     OSError) as e:
                 last = ImageError(
@@ -492,7 +498,17 @@ class HFImageProvider:
                 raise ImageError(
                     f"hf rejected the request ({status}): {raw[:200]!r}")
             try:
-                return _to_jpeg(raw)
+                # OpenAI-compatible envelope, verified live 2026-10-01:
+                # {"created": int, "data": [{"b64_json": "<base64 png>"}]}.
+                # Anything else is a loud failure, never a guess.
+                envelope = json.loads(raw)
+                b64 = envelope["data"][0]["b64_json"]
+                return _to_jpeg(base64.b64decode(b64))
+            except (KeyError, IndexError, ValueError,
+                    base64.binascii.Error) as e:
+                raise ImageError(
+                    f"hf image payload not decodable: {e}; "
+                    f"first bytes: {raw[:120]!r}") from e
             except Exception as e:
                 raise ImageError(
                     f"hf image payload not decodable: {e}") from e

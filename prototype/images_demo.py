@@ -416,10 +416,17 @@ except ImageError:
     check("response without image part raises", True)
 
 # --- 13. HF Inference provider REST contract: hermetic, no network ---
+# Contract verified LIVE 2026-10-01 from free-micro-1 (nscale provider route):
+# POST https://router.huggingface.co/nscale/v1/images/generations,
+# {"model": ..., "prompt": ..., "response_format": "b64_json"} -> 200
+# {"created": int, "data": [{"b64_json": "<base64 png>"}]}. Real 1024x1024
+# PNG confirmed (goal hidden_files/hf_first_test_image.png).
 def _hf_ok_transport(seen):
     def _fn(url, headers, body):
         seen.append((url, dict(headers), body))
-        return 200, _fake_png(256)  # HF returns raw image bytes
+        env = {"created": 1700000000,
+               "data": [{"b64_json": _b64.b64encode(_fake_png(256)).decode()}]}
+        return 200, json.dumps(env).encode()
     return _fn
 
 seen_hf = []
@@ -429,15 +436,15 @@ check("hf scene returns image bytes", len(hscene) > 1000)
 check("hf normalizes to JPEG", hscene[:2] == b"\xff\xd8")
 
 hurl, hheaders, hbody = seen_hf[0]
-check("hf request hits the router inference endpoint",
-      hurl == "https://router.huggingface.co/hf-inference/models/"
-             + HF_SCENE_MODEL)
+check("hf request hits the nscale OpenAI-compatible endpoint",
+      hurl == "https://router.huggingface.co/nscale/v1/images/generations")
 check("hf token in Bearer header, not URL",
       hheaders.get("Authorization") == "Bearer hf_test"
       and "hf_test" not in hurl)
 hpayload = json.loads(hbody)
-check("hf scene body is text inputs",
-      hpayload == {"inputs": "mist on the ridge"})
+check("hf scene body is the OpenAI-compatible shape",
+      hpayload == {"model": HF_SCENE_MODEL, "prompt": "mist on the ridge",
+                   "response_format": "b64_json"})
 check("scene model is FLUX.1-schnell", HF_SCENE_MODEL == "black-forest-labs/FLUX.1-schnell")
 check("selfie model is Kontext-dev", HF_SELFIE_MODEL == "black-forest-labs/FLUX.1-Kontext-dev")
 
@@ -447,26 +454,32 @@ href = _fake_png(128)
 hselfie = hp2.generate_selfie("damp hiker selfie", character_ref=href)
 check("hf selfie returns image bytes", len(hselfie) > 1000)
 hurl2, _, hbody2 = seen_hf2[0]
-check("hf selfie hits the selfie model endpoint",
-      hurl2.endswith("/" + HF_SELFIE_MODEL))
+check("hf selfie hits the same provider endpoint",
+      hurl2 == "https://router.huggingface.co/nscale/v1/images/generations")
 hpayload2 = json.loads(hbody2)
-check("hf selfie body carries prompt + base64 ref",
-      hpayload2["inputs"].startswith("Keep the SAME person as in the reference photo")
-      and _b64.b64decode(hpayload2["image"]) == href)
+check("hf selfie body is model + instruction prompt",
+      hpayload2["model"] == HF_SELFIE_MODEL
+      and hpayload2["prompt"].startswith(
+          "Keep the SAME person as in the reference photo")
+      and hpayload2["response_format"] == "b64_json")
 
 seen_hf3 = []
 hp3 = HFImageProvider("hf_test", request_fn=_hf_ok_transport(seen_hf3))
 hp3.generate_selfie("no ref available", character_ref=b"")
 hpayload3 = json.loads(seen_hf3[0][2])
-check("hf no-ref selfie is text inputs only",
-      set(hpayload3.keys()) == {"inputs"})
+check("hf no-ref selfie is the same OpenAI shape",
+      hpayload3["model"] == HF_SELFIE_MODEL
+      and hpayload3["prompt"].startswith(
+          "Keep the SAME person as in the reference photo"))
 
 hcalls = {"n": 0}
 def _hf_loading_then_ok(url, headers, body):
     hcalls["n"] += 1
     if hcalls["n"] == 1:
         return 503, b'{"error": "Model black-forest-labs/FLUX.1-schnell is currently loading"}'
-    return 200, _fake_png(256)
+    env = {"created": 1,
+           "data": [{"b64_json": _b64.b64encode(_fake_png(256)).decode()}]}
+    return 200, json.dumps(env).encode()
 hp4 = HFImageProvider("hf_test", request_fn=_hf_loading_then_ok)
 check("hf 503-loading retries once then succeeds",
       len(hp4.generate_scene("x")) > 1000 and hcalls["n"] == 2)
