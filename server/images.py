@@ -379,7 +379,7 @@ class GeminiImageProvider:
 # NOTE: the nscale routes hang from the sandbox egress (verified 2026-10-01),
 # so re-verify if the deploy egress ever changes.
 HF_SCENE_MODEL = "black-forest-labs/FLUX.1-schnell"
-HF_SELFIE_MODEL = "black-forest-labs/FLUX.1-Kontext-dev"
+HF_SELFIE_MODEL = "black-forest-labs/FLUX.1-schnell"  # 2026-10-01: Kontext-dev 400s on every OpenAI-compatible provider route (nscale, fal-ai, replicate) despite Hub mapping 'live' — selfies ride schnell (plain instruction-prefixed t2i, the already-shipped behavior) until a Kontext route is verified live
 HF_PROVIDER_BASE = ("https://router.huggingface.co/nscale/v1/"
                     "images/generations")
 
