@@ -77,11 +77,20 @@ opencode works with no login on the free path (verified 2026-09-28).
    `dry run: PASS` is the gate for step 3; `FAIL` prints which side
    broke (missing roster / failed outcome / leak hits).
    Crash resume: if the host dies mid-run (the keeper's reply waits are
-   hours long), re-run with `--resume [GUID]` — it re-attaches to the
-   in-flight roster call recorded in `<GUID>.pending.json` instead of
-   re-sending it, and the turn loop skips the steps the dead attempt
-   already recorded. Never `--resume` while the original process is
-   still alive.
+   hours long), re-run with `--resume [GUID]`. The crashed turn's DB
+   writes were never committed (run_turn commits once, at the end), so
+   uncommitted steps are re-derived: the resumed run re-sends the pick
+   and any later calls fresh, each correlated on its own sent_at plus
+   the reply-shape gate, so stale answers to dead sends are skipped
+   (live-verified 2026-10-01: a crash during turn-1 adjudicate re-derived
+   the pick and re-sent it — the `<GUID>.pending.json` re-attach only
+   fires when the resumed path reaches the exact recorded (call, turn_no)
+   with the record intact; in practice that is the step that was in
+   flight when nothing earlier needed re-deriving). Never `--resume`
+   while the original process is still alive. Launch with `python3 -u`
+   (unbuffered) so the log streams while the run is in flight — a
+   redirected stdout otherwise buffers and `tail` shows nothing until
+   the process ends.
 3. Seed a scratch game for the operator's own address only
    (`server/seed.py fog-line-mystery-v1`), so no outsider ever sees a turn.
 4. Let one poll cycle produce turn 1. Watch the log:
