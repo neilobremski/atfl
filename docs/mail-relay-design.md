@@ -119,6 +119,12 @@ never polls a mailbox. Decisions (2026-09-30):
    adapter implementing the same normalized-dict contract; `maybe_nudge`
    hands off too. Keep `FakeGmail` for tests (it now simulates the
    Murph side: `queue_inbound` ≈ a forwarded player mail).
+   TRANSPORT HALF DONE 2026-10-02 (#78): `server/murph_relay.py`
+   (22/22 selftest green) — normalize_inbound (the pinned #74 contract),
+   build_outbound_envelope + base64-ascii wire form, poll_inbound over
+   the node's a8s inbox dir, consume_inbound -> trash/, send_outbound
+   via `a8s tell` with TELL_OUTBOX_DIR + retry-once-then-loud. What
+   remains is the mailer.py/config.py/DESIGN.md §1/§5.3 rewrite to USE it.
 2. Rewrite `server/config.py` per the decisions above; update the systemd
    EnvironmentFile template in `deploy/`.
 3. Rewrite DESIGN.md §1 + §5.3 to describe the relay.
