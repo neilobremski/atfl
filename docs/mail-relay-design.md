@@ -127,6 +127,8 @@ never polls a mailbox. Decisions (2026-09-30):
 
 ## For Neil's eye (batched to the digest)
 
-- Player onboarding copy: how a player learns the address
-  (murph@inkboxmail.com) and what their first email should say. Wording and
-  tone are subjective — needs his read before anything player-facing ships.
+- Player onboarding copy: drafted 2026-10-01 in
+  `docs/relay-onboarding-copy-DRAFT.md` — how a player learns the address
+  (murph@inkboxmail.com) and what their first email should say. Wording
+  and tone are subjective — needs his read before anything player-facing
+  ships. The draft lists the five specific reads wanted.
