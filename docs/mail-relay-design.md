@@ -124,6 +124,12 @@ never polls a mailbox. Decisions (2026-09-30):
 3. Rewrite DESIGN.md §1 + §5.3 to describe the relay.
 4. Murph-side: implement the inbox filter + forwarding + thread-state file
    (my operational half; lives outside this repo).
+   DONE 2026-10-02 (#75/#76): inbound `hidden_files/atfl_relay_forwarder.py`
+   (14/14 selftest green, dry-run default, own seen-set), outbound
+   `hidden_files/atfl_relay_sender.py` (13/13 selftest green, thread pinned
+   per game_guid in `hidden_files/murph_relay_threads.json`, Idempotency-Key
+   per guid:turn + sent-ledger replay guard). Wire note: envelope attachment
+   "bytes" travels base64-ascii over A8S (sender accepts both forms).
 
 ## For Neil's eye (batched to the digest)
 
