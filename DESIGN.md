@@ -4,18 +4,26 @@ Design doc for the single-player MVP (Phase 2). Written section by section;
 the email protocol below is locked. Remaining sections are stubs until their
 work sessions.
 
-## 1. Email protocol (LOCKED 2026-09-26)
+## 1. Email protocol (LOCKED 2026-09-26; relay edition 2026-10-02)
 
 ### 1.1 Identity and the GUID
-- The game lives at one dedicated address (the game's own free Google
-  account; see `research/phase0-email-identity.md`). Players email that
-  address to start.
+- The game has no email identity of its own. Players email
+  **murph@inkboxmail.com**; Murph (the operator's agent) is the exchange
+  layer between the engine and players (decision 2026-09-30). The engine
+  never sends email directly and never polls a mailbox.
+- Transport between engine and Murph is A8S tell with structured JSON
+  envelopes (docs/mail-relay-design.md): `atfl_outbound` (engine →
+  Murph: game_guid, turn_no, to, subject, body_text, body_html,
+  attachments) and `atfl_inbound` (Murph → engine: from, subject,
+  body_text, inkbox_message_id). The engine's mail-adjacent surface is
+  the normalized inbound-dict contract the old GmailClient defined.
 - Every outbound turn email carries the game's GUID in a body footer line:
 
   `Game code: <GUID>`
 
   and in the subject tag `[ATFL <first-8-hex>]` so players can find their
-  game thread in a crowded inbox.
+  game thread in a crowded inbox. Murph preserves subjects verbatim, so
+  GUID routing survives the relay unmodified.
 - Inbound matching: **GUID + sender address** is the join key into the
   world-state DB (`games.guid`, `games.player_email` — "game files live
   under GUID + sender address, semi-secure", per the design notes). A reply
@@ -24,19 +32,21 @@ work sessions.
   clarification email, not a guess.
 - GUID format: UUID4, lowercase hex with dashes (36 chars). Short form
   (first 8 hex) is display-only, never a join key.
-- Gmail threading: replies keep `In-Reply-To` / `References` so each game's
-  turns form one thread in the player's inbox.
+- Threading: Murph owns the player-facing thread — one Inkbox thread per
+  game, In-Reply-To/References managed on Murph's side. The engine keeps
+  no thread state (the old `thread_message_id` / `thread_refs` columns
+  are retired).
 
 ### 1.2 Turn cadence
 - One game-time turn ≈ **1 hour of game clock** (fixed per scenario; the
   design notes' default).
 - Real-world cadence for play: roughly **one turn email per player per day**.
-- The server polls the game mailbox every few minutes; a player email
-  starts a turn when it arrives — there is no fixed daily deadline in the
+- The server polls its A8S inbox every few minutes; a forwarded player
+  email starts a turn when it arrives — there is no fixed daily deadline in the
   single-player MVP. Playtest tempo (hourly emails, daylight hours) is a
   scenario config, not a protocol change.
 - The GM sends a turn reply only when a turn ran. No spam: at most one
-  outbound email per inbound player email, plus at most one daily
+  outbound handoff per inbound player email, plus at most one daily
   "still your move"-style nudge for stalled games (Phase 2 detail).
 
 ### 1.3 Expired-turn rules
@@ -562,22 +572,26 @@ Turn {N} · Day {d}, {HH:MM}
 
 ### 5.3 The other email types (system voice, never in-character)
 GM fiction goes only in turn emails. Everything else is plain, honest system
-text — no narration, no spoilers, no mechanics talk:
+text — no narration, no spoilers, no mechanics talk. All of these leave the
+engine as atfl_outbound handoff envelopes to Murph (relay edition
+2026-10-02); the engine sends nothing directly:
 - **Standalone nudge** (fallback-only, ≤1/24h, §2.3): ≤120 words, structural
-  policy per §2.4. Sent as a thread reply. Mutates nothing.
-- **Clarification** (ambiguous inbound, §1.1): fresh thread,
-  subject `[ATFL] Couldn't match your game`. Body: "I got your message but
-  couldn't match it to a game. Reply with the Game code from a previous
-  email, or email <game address> to start a new game." No fiction, no retry
-  of the player's intent.
+  policy per §2.4. Handed to Murph as a nudge envelope; Murph threads it
+  into the game's thread. Mutates nothing.
+- **Clarification** (ambiguous inbound, §1.1): the envelope carries
+  `fresh_thread: true` (advisory — Murph's sender currently keeps one
+  thread per game; restoring the fresh-thread behavior is a Murph-side
+  extension). Subject `[ATFL] Couldn't match your game`. Body: "I got your
+  message but couldn't match it to a game. Reply with the Game code from a
+  previous email, or email murph@inkboxmail.com to start a new game."
+  No fiction, no retry of the player's intent.
 - **Death / game-end**: the final turn email follows the §5.2 layout (it is a
   turn), but the prompt is replaced by an explicit closer: "This was your
   last email. The game is over." No nudges follow (§2.4 — no dead-game
   nudges); a reply starts a new game.
-- **Threading**: turn/nudge/death emails set `In-Reply-To`/`References` to
-  the previous message so each game is one Gmail thread (§1.1). Clarification
-  starts a new thread; if the player replies to it with a code, the resolved
-  game continues on its own thread.
+- **Threading**: Murph owns the player-facing thread — one Inkbox thread per
+  game (§1.1). The engine keeps no threading state; the old
+  `thread_message_id` / `thread_refs` columns are retired.
 
 ### 5.4 Map-as-text block (placeholder → Phase 3)
 - MVP variant: a simple discovered-places list under `--- Known places ---`,

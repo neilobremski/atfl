@@ -1,17 +1,17 @@
 """Poll loop entry point — Above the Fog Line server (Phase 2 MVP).
 
 Runs on free-micro-1 under systemd (deploy/atfl.service). One process,
-one loop: every ATFL_POLL_MIN minutes it runs a full mailer cycle
-(poll -> dispatch -> send -> nudge sweep). Crashes inside a cycle are
-logged and the loop continues; process-level death is systemd's job
-(Restart=always). No network call happens until a real token exists —
-gmail_adapter.build_service raises first.
+one loop: every ATFL_POLL_MIN minutes it runs a full relay cycle
+(poll A8S inbox -> dispatch -> hand off to Murph -> nudge sweep).
+Crashes inside a cycle are logged and the loop continues; process-level
+death is systemd's job (Restart=always). Outbound leaves via `a8s tell`
+to ATFL_MURPH_NODE — a failed handoff is loud (§2.6), never half-sent.
 
 Usage on the VM:
     /srv/atfl/venv/bin/python -m server.poll          # loop forever
     /srv/atfl/venv/bin/python -m server.poll --once   # one cycle, then exit
     /srv/atfl/venv/bin/python -m server.poll --fake   # smoke test with
-                         FakeGmail + MockGM; never touches the network.
+                         FakeGmail + MockGM; shells no `a8s tell`.
 """
 import argparse
 import logging
@@ -22,9 +22,8 @@ import time
 import traceback
 
 from . import config
-from .gmail_adapter import GoogleApiGmail, build_service, messages_resource
 from .gm import MockGM, RosterGM
-from .mailer import run_poll_cycle
+from .mailer import FakeGmail, run_poll_cycle
 
 log = logging.getLogger("atfl.poll")
 
@@ -38,40 +37,44 @@ def _handle_term(signum, _frame):
     _stop = True
 
 
-def run_once(gmail, gm, cfg):
+def run_once(relay, gm, cfg):
     """One poll cycle; returns the result dict. Exceptions propagate to
     the caller — the loop logs them per-cycle and keeps going."""
     started = time.time()
-    result = run_poll_cycle(
+    kwargs = dict(
         games_dir=cfg["games_dir"],
-        gmail=gmail,
         gm=gm,
-        game_address=cfg["game_address"],
+        engine_node=cfg["a8s_node"],
+        murph_node=cfg["murph_node"],
+        node_root=cfg["a8s_node_root"],
         turn_len_min=cfg["turn_len_min"],
         images={"mode": cfg["images_mode"],
                 "api_key": cfg["image_api_key"],
                 "hf_token": cfg["hf_token"]},
     )
+    if relay is not None:
+        kwargs["relay"] = relay
+    result = run_poll_cycle(**kwargs)
     sent = result.get("sent", [])
     nudged = result.get("nudged", [])
-    log.info("cycle done in %.1fs: %d inbound processed, %d sent, %d nudged",
-             time.time() - started, len(sent), len(sent), len(nudged))
+    handed = sum(1 for s in sent if s.get("handoff"))
+    log.info("cycle done in %.1fs: %d inbound processed, %d handed off, "
+             "%d nudged", time.time() - started, len(sent), handed,
+             len(nudged))
     for s in sent:
-        log.info("sent: %s action=%s guid=%s turn=%s note=%s",
+        log.info("sent: %s action=%s guid=%s turn=%s handoff=%s note=%s",
                  s.get("sender"), s.get("action"), s.get("guid"),
-                 s.get("turn_no"), s.get("note"))
+                 s.get("turn_no"), s.get("handoff"), s.get("note"))
     return result
 
 
-def build_clients(cfg):
-    """gm per ATFL_GM (mock default; RosterGM for 'roster') and the Gmail
-    client (real adapter once the token exists). Called once at startup."""
-    gm = (RosterGM(node_name=cfg["a8s_node"],
-                   node_root=cfg["a8s_node_root"])
-          if cfg["gm"] == "roster" else MockGM())
-    service = build_service(cfg["token_path"])  # raises until OQ#1 closes
-    gmail = GoogleApiGmail(messages_resource(service))
-    return gmail, gm
+def build_gm(cfg):
+    """gm per ATFL_GM (mock default; RosterGM for 'roster'). Called once
+    at startup."""
+    if cfg["gm"] == "roster":
+        return RosterGM(node_name=cfg["a8s_node"],
+                        node_root=cfg["a8s_node_root"])
+    return MockGM()
 
 
 def main(argv=None):
@@ -79,7 +82,7 @@ def main(argv=None):
     ap.add_argument("--once", action="store_true",
                     help="run one poll cycle, then exit")
     ap.add_argument("--fake", action="store_true",
-                    help="smoke test: FakeGmail + MockGM, no network")
+                    help="smoke test: FakeGmail + MockGM, no `a8s tell`")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO,
@@ -96,21 +99,20 @@ def main(argv=None):
     os.makedirs(cfg["games_dir"], exist_ok=True)
     log.info("games dir: %s", cfg["games_dir"])
 
+    relay = None
     if args.fake:
-        from .mailer import FakeGmail
-        gmail = FakeGmail(game_address=cfg["game_address"])
+        relay = FakeGmail(murph_node=cfg["murph_node"],
+                          engine_node=cfg["a8s_node"])
         gm = MockGM()
-        log.info("FAKE MODE: no network, no token needed")
+        log.info("FAKE MODE: no `a8s tell`, nothing leaves the process")
     else:
-        try:
-            gmail, gm = build_clients(cfg)
-        except RuntimeError as e:
-            log.error("cannot build Gmail client: %s", e)
-            return 2
-        log.info("polling %s every %d min (turn length %d min)",
-                 cfg["game_address"], cfg["poll_min"], cfg["turn_len_min"])
+        gm = build_gm(cfg)
+        log.info("polling a8s inbox of %s every %d min (turn length %d min),"
+                 " handing off to murph node %s",
+                 cfg["a8s_node"], cfg["poll_min"], cfg["turn_len_min"],
+                 cfg["murph_node"])
 
-    run_once(gmail, gm, cfg)
+    run_once(relay, gm, cfg)
     if args.once or args.fake:
         return 0
 
@@ -123,7 +125,7 @@ def main(argv=None):
         if _stop:
             break
         try:
-            run_once(gmail, gm, cfg)
+            run_once(relay, gm, cfg)
         except Exception:
             log.error("cycle failed; loop continues\n%s",
                       traceback.format_exc())

@@ -15,10 +15,11 @@ CREATE TABLE games (
     turn_no INTEGER NOT NULL DEFAULT 0,
     game_clock_min INTEGER NOT NULL DEFAULT 0,
     started_at TEXT, ended_at TEXT,
-    -- mailer bookkeeping (DESIGN §1.1/§5.3): one Gmail thread per game
-    thread_message_id TEXT,  -- RFC Message-ID of our last outbound email (the In-Reply-To key)
-    thread_refs TEXT,        -- References chain for the next reply
-    last_email_at TEXT       -- when we last sent anything for this game
+    -- mailer bookkeeping (DESIGN §1.1/§5.3): the last handoff time
+    -- drives the nudge gate. Threading lives on Murph's side now
+    -- (relay edition 2026-10-02); the old thread_message_id/thread_refs
+    -- columns are retired — pre-relay DB files keep them vestigially.
+    last_email_at TEXT       -- when we last handed anything to Murph
 );
 CREATE TABLE places (
     id INTEGER PRIMARY KEY,
@@ -110,10 +111,12 @@ def create_db(path=":memory:"):
 
 
 def ensure_mailer_columns(db):
-    """Add the mailer bookkeeping columns to the games table if a DB
-    predates them (DESIGN §1.1/§5.3 threading state). Idempotent."""
+    """Add the mailer bookkeeping column to the games table if a DB
+    predates it (DESIGN §1.1/§5.3 nudge gate). Idempotent. The old
+    thread_message_id/thread_refs columns are retired (relay edition
+    2026-10-02) and no longer added."""
     cols = {r[1] for r in db.execute("PRAGMA table_info(games)")}
-    for col in ("thread_message_id", "thread_refs", "last_email_at"):
+    for col in ("last_email_at",):
         if col not in cols:
             db.execute(f"ALTER TABLE games ADD COLUMN {col} TEXT")
     db.commit()

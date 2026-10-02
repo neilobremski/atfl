@@ -148,15 +148,16 @@ else
     echo "[dry-run] write $ETC_DIR/atfl.env (600 root:atfl, ATFL_GM=mock default)"
   else
     sudo tee "$ETC_DIR/atfl.env" >/dev/null <<'EOF'
-ATFL_GAME_ADDRESS=
+# Relay edition 2026-10-02: the engine sends no email directly. It hands
+# atfl_outbound envelopes to Murph's A8S node and polls its own A8S
+# inbox for Murph's atfl_inbound forwards.
+ATFL_MURPH_NODE=murph
+ATFL_A8S_NODE=atfl-server
+ATFL_A8S_NODE_ROOT=/srv/atfl/a8s/atfl-server
 ATFL_POLL_MIN=5
 ATFL_TURN_LEN_MIN=60
 ATFL_GM=mock
 ATFL_GAMES_DIR=/var/lib/atfl/games
-ATFL_TOKEN_PATH=/etc/atfl/token.json
-# Roster backend (flip ATFL_GM to roster only for the dry run):
-ATFL_A8S_NODE=atfl-server
-ATFL_A8S_NODE_ROOT=/srv/atfl/a8s/atfl-server
 # Images: off | stub | hf ('hf' needs ATFL_HF_TOKEN; no paid keys)
 ATFL_IMAGES=off
 ATFL_HF_TOKEN=

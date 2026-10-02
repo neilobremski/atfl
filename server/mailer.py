@@ -1,71 +1,52 @@
-"""Mailer layer — DESIGN.md §1.1, §5.3 + research/phase0-email-identity.md.
+"""Mailer layer — relay edition (DESIGN.md §1.1, §5.3; rewritten 2026-10-02).
 
-Maps dispatch outcomes to Gmail sends and polls the game mailbox. Built
-against an abstract GmailClient (the game's real address is still open
-question #1, so no live mailbox is touched here); the real API adapter
-lives in server/gmail_adapter.py and FakeGmail (tests) both implement it.
+The engine sends NO email directly (Neil's 2026-09-30 decision): outbound
+goes to Murph over A8S as atfl_outbound envelopes, and inbound arrives as
+atfl_inbound forwards that Murph polls from murph@inkboxmail.com
+(docs/mail-relay-design.md). This module maps dispatch outcomes to
+handoffs and polls the engine's A8S inbox for Murph's forwards.
 
-Threading (§1.1, §5.3): every game's turn/nudge/death emails form one
-Gmail thread. The mailer keeps per-game threading state in the games
-table (`thread_message_id`, `thread_refs` — see schema.py): turn emails
-go out as thread replies (In-Reply-To/References), clarification emails
-always start a fresh thread.
+Transport contract (what tests inject): a "relay" object implementing
+
+    poll_inbound(engine_node, agents_dir=None) -> [(envelope, source_path)]
+    normalize_inbound(envelope) -> normalized inbound dict
+    build_outbound_envelope(game_guid, turn_no, to_addr, subject,
+                            body_text, body_html, composite_jpeg=None)
+    consume_inbound(source_path, engine_node, agents_dir=None)
+    send_outbound(envelope, murph_node, node_root) -> True (raises loudly
+        on failure — §2.6: a handoff that fails is never half-sent)
+
+The live implementation is server/murph_relay.py (pass relay=None to use
+it). Tests use FakeGmail below, which simulates the Murph side
+(queue_inbound ≈ a forwarded player mail).
 
 Rules enforced here, not elsewhere:
-  - `failed` / `ignored` outcomes send NOTHING (§2.6).
-  - Inbound mail FROM the game address itself is ignored (anti-loop).
-  - Attachments are logged in `mutations` and never acted on (§2.2).
+  - `failed` / `ignored` outcomes hand off NOTHING (§2.6).
+  - The §2.2 attachments rule holds trivially: atfl_inbound forwards
+    carry no attachment metadata (normalize_inbound always yields []),
+    so there is nothing to log and nothing to act on.
   - The standalone nudge (§2.3/§2.4/§5.3) is mailer-level: at most one
-    per 24h per active game, only when no turn email went out in that
+    per 24h per active game, only when no handoff went out in that
     window, never in-character, mutates nothing in the world tables.
+
+Threading moved to Murph's side (one Inkbox thread per game): the old
+thread_message_id/thread_refs bookkeeping is gone from this module and
+from schema.py; last_email_at survives because it drives the nudge gate.
+Per-turn stats still record send_ms — it now measures the A8S handoff to
+Murph, not an SMTP send (design doc notes the semantic change).
 """
-import base64
 import logging
 import os
 import sqlite3
 import time
-from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
-from email import policy
-from email.message import EmailMessage
-from email.parser import BytesParser
-from email.utils import make_msgid
-
-_MSG = BytesParser(policy=policy.default)
 
 from .render import (render_nudge, COMPOSITE_CID, COMPOSITE_IMG_MARKER,
                      COMPOSITE_IMG_TAG)
 from . import schema as _schema
-
-GAME_ADDRESS = "abovethefogline@example.invalid"  # STUB until OQ#1 closes
+from . import murph_relay as _relay
 
 NUDGE_MAX_AGE_H = 24  # §5.3: ≤1 standalone nudge per 24h per game
-
-
-class GmailClient(ABC):
-    """Minimal Gmail surface the mailer needs. A real adapter maps these
-    onto users.messages.list/get/send/modify; tests use FakeGmail."""
-
-    @abstractmethod
-    def list(self, query, max_results=50, page_token=None):
-        """-> {"messages": [{"id","threadId"}], "nextPageToken"?}"""
-
-    @abstractmethod
-    def get(self, message_id):
-        """-> normalized dict: id, thread_id, header_message_id, from,
-        sender (parsed lowercase address), to, subject, date, body
-        (plain text), attachments ([{filename, size_bytes}]), label_ids."""
-
-    @abstractmethod
-    def send(self, raw_b64):
-        """Send a base64url RFC822 message.
-        -> {"id", "threadId", "message_id"?} — message_id is the RFC
-        Message-ID of the sent mail when the adapter can learn it; the
-        mailer prefers it for In-Reply-To/References bookkeeping."""
-
-    @abstractmethod
-    def mark_read(self, message_id):
-        """Remove UNREAD from the message."""
 
 
 def _utcnow_iso():
@@ -79,219 +60,56 @@ def _open_game_db(games_dir, guid):
     return db
 
 
-def extract_text_body(raw_bytes):
-    """Best plain-text body from an RFC822 message: prefer the first
-    text/plain part, fall back to any text part."""
-    msg = _MSG.parsebytes(raw_bytes)
-    if not msg.is_multipart():
-        payload = msg.get_payload(decode=True) or b""
-        return payload.decode(msg.get_content_charset() or "utf-8",
-                              errors="replace")
-    plain, other = None, None
-    for part in msg.walk():
-        if part.is_multipart() or part.get_content_disposition() == "attachment":
-            continue
-        ctype = part.get_content_type()
-        text = (part.get_payload(decode=True) or b"").decode(
-            part.get_content_charset() or "utf-8", errors="replace")
-        if ctype == "text/plain" and plain is None:
-            plain = text
-        elif other is None:
-            other = text
-    return (plain or other or "").strip()
-
-
-def build_raw(from_addr, to_addr, subject, body,
-              in_reply_to=None, references=None, attachments=None,
-              html_body=None):
-    """RFC822 bytes for a send, with optional threading and attachments.
-
-    Sets an explicit Message-ID (Gmail preserves a supplied one): the
-    mailer threads on RFC Message-IDs, never on Gmail API ids.
-
-    html_body: when given, the message becomes multipart/alternative
-    (text/plain + text/html) — plain text always carries the complete
-    message; the HTML twin is the rich reading layer (Neil's 2026-09-27
-    directive: every game email goes out in rich HTML).
-
-    attachments: [(filename, data_bytes, mimetype[, content_id])] — a
-    4th element marks the part as INLINE (Content-ID header), so the
-    HTML can show it with <img src="cid:...">. Gmail renders inline
-    cid-referenced parts inside the body rather than as a download
-    row at the bottom (this is the "inline images" requirement from
-    Neil's 2026-09-27 input)."""
-    m = EmailMessage()
-    m["From"] = from_addr
-    m["To"] = to_addr
-    m["Subject"] = subject
-    m["Message-ID"] = make_msgid(domain=from_addr.split("@")[-1])
-    if in_reply_to:
-        m["In-Reply-To"] = in_reply_to
-    if references:
-        m["References"] = references
-    m.set_content(body)
-    if html_body:
-        m.add_alternative(html_body, subtype="html")
-    for att in (attachments or []):
-        filename, data, mimetype = att[0], att[1], att[2]
-        cid = att[3] if len(att) > 3 else None
-        maintype, _, subtype = mimetype.partition("/")
-        m.add_attachment(data, maintype=maintype or "application",
-                         subtype=subtype or "octet-stream",
-                         filename=filename)
-        if cid:
-            part = m.get_payload()[-1]
-            del part["Content-Disposition"]
-            part.add_header("Content-Disposition", "inline",
-                            filename=filename)
-            part.add_header("Content-ID", f"<{cid}>")
-    return m.as_bytes()
-
-
-def _html_for_send(html, attachments):
+def _resolve_composite_marker(html, has_composite):
     """Resolve the composite marker in a turn email's HTML twin: with
     the composite attached -> inline <img cid:...>; without -> the
-    marker is dropped, never a broken image."""
+    marker is dropped, never a broken image. (Was _html_for_send; the
+    attachment rides in the atfl_outbound envelope now, not in MIME.)"""
     if not html or COMPOSITE_IMG_MARKER not in html:
         return html
-    cids = {a[3] for a in (attachments or []) if len(a) > 3 and a[3]}
-    if COMPOSITE_CID in cids:
+    if has_composite:
         return html.replace(COMPOSITE_IMG_MARKER, COMPOSITE_IMG_TAG)
     return html.replace(COMPOSITE_IMG_MARKER, "")
 
 
-def _from_addr(value):
-    """'Name <a@b>' -> 'a@b'."""
-    v = (value or "").strip()
-    if "<" in v and v.endswith(">"):
-        v = v[v.index("<") + 1:-1]
-    return v.strip().lower()
+def poll_inbox(engine_node, skip_ids=None, agents_dir=None, relay=None):
+    """Poll the engine's A8S inbox for Murph's atfl_inbound forwards.
 
-
-def poll_inbox(gmail, game_address=GAME_ADDRESS, since_days=2,
-               max_results=50, skip_ids=None):
-    """List candidate inbound messages and normalize them. Caller dedupes
-    by id against its seen-set and feeds new ones to dispatch.
-
-    skip_ids: ids the mailer has already processed — they are skipped
-    BEFORE the get call, so re-polls cost one cheap list only
-    (quota-light). The query carries is:unread so processed-and-marked
-    messages never re-list; the seen-set covers the rest (mark_read is
-    best-effort and the process may restart).
-
-    Returns [inbound], each: id, thread_id, header_message_id, sender,
-    subject, date, body, attachments."""
-    query = f"to:{game_address} newer_than:{since_days}d -in:sent is:unread"
+    Returns [(inbound, source_path)]: the normalized dicts carry exactly
+    the keys the old GmailClient.get dicts had, so dispatch/
+    extract_guid/match_game run unmodified. skip_ids are
+    inkbox_message_ids already processed (the seen-set covers restarts).
+    Files are NOT consumed here — run_poll_cycle consumes each after its
+    handoff, or leaves it in place on failure so the next cycle retries.
+    """
+    relay = _relay if relay is None else relay
     skip = set(skip_ids or ())
-    page_token = None
     out = []
-    while True:
-        page = gmail.list(query, max_results=max_results,
-                          page_token=page_token)
-        for ref in page.get("messages", []):
-            if ref["id"] in skip:
-                continue
-            full = gmail.get(ref["id"])
-            if _from_addr(full.get("from")) == game_address.lower():
-                continue  # our own sends — anti-loop guard
-            out.append(full)
-        page_token = page.get("nextPageToken")
-        if not page_token:
-            break
+    for envelope, path in relay.poll_inbound(engine_node,
+                                             agents_dir=agents_dir):
+        inbound = relay.normalize_inbound(envelope)
+        if inbound["id"] in skip:
+            continue
+        out.append((inbound, path))
     return out
 
 
-def _mail_state(games_dir, guid):
+def _record_handoff(games_dir, guid):
+    """Bookkeeping after a successful handoff: when we last handed
+    anything to Murph for this game (drives the nudge gate)."""
     db = _open_game_db(games_dir, guid)
     try:
-        row = db.execute(
-            "SELECT thread_message_id, thread_refs, last_email_at, status"
-            " FROM games WHERE guid=?", (guid,)).fetchone()
-        return dict(row) if row else None
-    finally:
-        db.close()
-
-
-def _chain(*parts):
-    """Dedupe-preserve a References chain: existing refs, then the
-    message being replied to, then the new sent id."""
-    out = []
-    for p in parts:
-        for tok in (p or "").split():
-            if tok not in out:
-                out.append(tok)
-    return " ".join(out)
-
-
-def _record_send(games_dir, guid, rfc_message_id, full_refs):
-    """Thread-state bookkeeping after a successful send.
-
-    Stores the RFC Message-ID (what In-Reply-To/References need), not
-    the Gmail API id — a Gmail id in In-Reply-To threads by luck only."""
-    db = _open_game_db(games_dir, guid)
-    try:
-        db.execute(
-            "UPDATE games SET thread_message_id=?, thread_refs=?,"
-            " last_email_at=? WHERE guid=?",
-            (rfc_message_id, full_refs, _utcnow_iso(), guid))
+        db.execute("UPDATE games SET last_email_at=? WHERE guid=?",
+                   (_utcnow_iso(), guid))
         db.commit()
     finally:
         db.close()
 
 
-def _sent_rfc_id(sent):
-    """The RFC Message-ID to file for threading: prefer the adapter's
-    message_id, fall back to the Gmail id (self-heals on the next send)."""
-    return sent.get("message_id") or sent["id"]
-
-
-def send_outcome(games_dir, gmail, outcome, inbound, game_address=GAME_ADDRESS,
-                 attachments=None):
-    """Map one DispatchOutcome to Gmail (or to nothing).
-
-    inbound is the normalized poll dict for the triggering message —
-    its header_message_id becomes In-Reply-To for turn 1 (no thread
-    state yet). attachments ride on turn emails only (the Phase 3
-    composite); clarification/nudge stay text-only per §5.3. Returns the
-    sent message id, or None when nothing sent.
-    """
-    if outcome.action in ("failed", "ignored"):
-        return None  # §2.6: nothing leaves on failure
-    to_addr = outcome.sender
-
-    if outcome.action == "turn_email":
-        state = _mail_state(games_dir, outcome.guid) or {}
-        in_reply_to = (state.get("thread_message_id")
-                       or inbound.get("header_message_id"))
-        refs = _chain(state.get("thread_refs"), in_reply_to)
-        raw = build_raw(game_address, to_addr, outcome.subject,
-                        outcome.body, in_reply_to, refs or None,
-                        attachments=attachments,
-                        html_body=_html_for_send(outcome.html,
-                                                 attachments))
-        t0 = time.perf_counter()
-        sent = gmail.send(base64.urlsafe_b64encode(raw).decode())
-        send_ms = (time.perf_counter() - t0) * 1000.0
-        rfc_id = _sent_rfc_id(sent)
-        _record_send(games_dir, outcome.guid, rfc_id,
-                     _chain(refs, in_reply_to, rfc_id))
-        _record_send_stats(games_dir, outcome.guid, outcome.turn_no,
-                           send_ms)
-        return sent["id"]
-
-    if outcome.action == "clarify":
-        # §5.3: clarification is always a fresh thread — no threading
-        # headers, so a confused player never lands mid-game-thread.
-        raw = build_raw(game_address, to_addr, outcome.subject,
-                        outcome.body, html_body=outcome.html)
-        return gmail.send(base64.urlsafe_b64encode(raw).decode())["id"]
-
-    return None
-
-
-def _record_send_stats(games_dir, guid, turn_no, send_ms):
-    """§6.3: fill the send side of the turn's stats row once the email
-    actually leaves. Only turn emails have stats rows; clarification and
+def _record_send_stats(games_dir, guid, turn_no, handoff_ms):
+    """§6.3: fill the send side of the turn's stats row once the handoff
+    actually leaves. send_ms now measures the A8S handoff to Murph, not
+    an SMTP send. Only turn emails have stats rows; clarification and
     nudge emails (no turn) are not part of the dogfooding set."""
     db = _open_game_db(games_dir, guid)
     try:
@@ -302,37 +120,104 @@ def _record_send_stats(games_dir, guid, turn_no, send_ms):
             return
         db.execute(
             "UPDATE turn_stats SET send_ms=?, email_sent_at=? WHERE turn_id=?",
-            (send_ms, _utcnow_iso(), row["id"]))
+            (handoff_ms, _utcnow_iso(), row["id"]))
         db.commit()
     finally:
         db.close()
 
 
-def log_attachments(games_dir, guid, inbound):
-    """§2.2: attachments are logged (mutations audit) and never acted on."""
-    if not inbound.get("attachments"):
-        return
-    db = _open_game_db(games_dir, guid)
+def send_outcome(games_dir, outcome, inbound, murph_node, node_root,
+                 images=None, relay=None):
+    """Map one DispatchOutcome to a Murph handoff (or to nothing).
+
+    inbound is the normalized poll dict for the triggering message.
+    Returns (handed_off, note): note carries the image outcome for turn
+    emails ("composite attached (...)" / "images skipped (...)").
+
+    turn_no on the envelope: turn emails carry the turn number (the
+    Murph-side replay guard dedupes per guid:turn). Clarify and nudge
+    have no turn, and the guard would treat every (guid, None) pair as
+    the same send — so clarify carries "clarify-<inkbox id>" (stable
+    across retries of the same clarify, distinct across clarifies) and
+    nudge carries "nudge-<UTC date>" (stable across retries of the same
+    day's nudge, distinct across days).
+
+    A handoff failure raises (A8STransportError) — loud §2.6, never
+    half-sent; the caller leaves the inbox file unconsumed so the next
+    cycle retries.
+    """
+    relay = _relay if relay is None else relay
+    if outcome.action in ("failed", "ignored"):
+        return False, None  # §2.6: nothing leaves on failure
+    to_addr = outcome.sender
+
+    if outcome.action == "turn_email":
+        jpeg, img_note = _turn_composite(games_dir, outcome, images)
+        html = _resolve_composite_marker(outcome.html, jpeg is not None)
+        envelope = relay.build_outbound_envelope(
+            outcome.guid, outcome.turn_no, to_addr, outcome.subject,
+            outcome.body, html, composite_jpeg=jpeg)
+        t0 = time.perf_counter()
+        relay.send_outbound(envelope, murph_node, node_root)
+        handoff_ms = (time.perf_counter() - t0) * 1000.0
+        _record_handoff(games_dir, outcome.guid)
+        _record_send_stats(games_dir, outcome.guid, outcome.turn_no,
+                           handoff_ms)
+        return True, img_note
+
+    if outcome.action == "clarify":
+        # §5.3: clarification was always a fresh thread. Murph's sender
+        # currently keeps one thread per game, so fresh_thread rides as
+        # an advisory key (the sender tolerates extra keys) until the
+        # Murph side implements it.
+        envelope = relay.build_outbound_envelope(
+            outcome.guid, f"clarify-{inbound['id']}", to_addr,
+            outcome.subject, outcome.body, outcome.html)
+        envelope["fresh_thread"] = True
+        relay.send_outbound(envelope, murph_node, node_root)
+        return True, None
+
+    return False, None
+
+
+def _turn_composite(games_dir, outcome, images_cfg):
+    """Phase 3: build the turn's composite JPEG for a turn_email
+    outcome. Returns (jpeg_bytes_or_None, note_or_None).
+
+    Any failure → (None, note); the text-only turn still sends (§2.6:
+    images never fail a turn). Only turn emails get composites;
+    clarify/nudge stay text-only.
+    """
+    if (not images_cfg) or images_cfg.get("mode") in (None, "off") \
+            or outcome.action != "turn_email":
+        return None, None
     try:
-        latest = db.execute("SELECT MAX(id) FROM turns").fetchone()[0] or 0
-        for att in inbound["attachments"]:
-            new = f"{att.get('filename') or '(unnamed)'} ({att.get('size_bytes', 0)} bytes)"
-            db.execute(
-                "INSERT INTO mutations (turn_id,entity_type,entity_id,field,"
-                " old_value,new_value,cause) VALUES (?,?,?,?,?,?,?)",
-                (latest, "game", 0, "attachment_received", None, new,
-                 "logged; never acted on (§2.2)"))
-        db.commit()
-    finally:
-        db.close()
+        from .images import build_provider, build_turn_composite, ImageError
+        provider = build_provider(images_cfg.get("mode"),
+                                  api_key=images_cfg.get("api_key"),
+                                  hf_token=images_cfg.get("hf_token"))
+        if provider is None:
+            return None, None
+        comp = build_turn_composite(games_dir, outcome.guid,
+                                    outcome.turn_no, provider)
+        return (comp["jpeg"],
+                f"composite attached ({comp['time_of_day']}, "
+                f"ref={'kept' if comp['character_ref_used'] else 'new'})")
+    except Exception as e:
+        # log, never raise: text carries the complete turn
+        logging.getLogger("atfl.mailer").warning(
+            "images skipped for guid=%s turn=%s: %s",
+            outcome.guid, outcome.turn_no, e)
+        return None, f"images skipped ({type(e).__name__}: {e})"
 
 
-def maybe_nudge(games_dir, gmail, gm_unused=None, game_address=GAME_ADDRESS,
+def maybe_nudge(games_dir, murph_node, node_root, relay=None,
                 max_age_h=NUDGE_MAX_AGE_H):
     """§2.3/§5.3 standalone-nudge fallback (mailer-level): for each active
-    game with no outbound email in the last max_age_h, send one short
-    system nudge as a thread reply. Advances nothing, mutates nothing in
-    the world tables (only the mailer bookkeeping columns)."""
+    game with no handoff in the last max_age_h, hand one short system
+    nudge envelope to Murph. Advances nothing, mutates nothing in the
+    world tables (only the last_email_at bookkeeping column)."""
+    relay = _relay if relay is None else relay
     sent = []
     cutoff = (datetime.now(timezone.utc)
               - timedelta(hours=max_age_h)).isoformat()
@@ -345,8 +230,8 @@ def maybe_nudge(games_dir, gmail, gm_unused=None, game_address=GAME_ADDRESS,
         db = _open_game_db(games_dir, guid)
         try:
             row = db.execute(
-                "SELECT status, player_email, thread_message_id, thread_refs,"
-                " last_email_at FROM games WHERE guid=?", (guid,)).fetchone()
+                "SELECT status, player_email, last_email_at FROM games"
+                " WHERE guid=?", (guid,)).fetchone()
         finally:
             db.close()
         if row is None or row["status"] != "active":
@@ -354,15 +239,13 @@ def maybe_nudge(games_dir, gmail, gm_unused=None, game_address=GAME_ADDRESS,
         if row["last_email_at"] and row["last_email_at"] >= cutoff:
             continue
         subject, body, html = render_nudge(guid)
-        raw = build_raw(game_address, row["player_email"], subject, body,
-                        row["thread_message_id"], row["thread_refs"] or None,
-                        html_body=html)
-        sent_msg = gmail.send(base64.urlsafe_b64encode(raw).decode())
-        rfc_id = _sent_rfc_id(sent_msg)
-        _record_send(games_dir, guid, rfc_id,
-                     _chain(row["thread_refs"], row["thread_message_id"],
-                            rfc_id))
-        sent.append({"guid": guid, "message_id": sent_msg["id"]})
+        envelope = relay.build_outbound_envelope(
+            guid,
+            "nudge-" + datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            row["player_email"], subject, body, html)
+        relay.send_outbound(envelope, murph_node, node_root)
+        _record_handoff(games_dir, guid)
+        sent.append({"guid": guid, "handoff": True})
     return sent
 
 
@@ -371,8 +254,8 @@ def _seen_db_path(games_dir):
 
 
 def _load_seen(games_dir):
-    """Ids already processed in a previous process lifetime. Empty set
-    when the mailer state DB doesn't exist yet."""
+    """inkbox_message_ids already processed in a previous process
+    lifetime. Empty set when the mailer state DB doesn't exist yet."""
     path = _seen_db_path(games_dir)
     if not os.path.exists(path):
         return set()
@@ -384,7 +267,7 @@ def _load_seen(games_dir):
 
 
 def _store_seen(games_dir, message_ids):
-    """Record processed ids AFTER full processing (send + mark-read
+    """Record processed ids AFTER full processing (handoff + consume
     attempted): at-least-once on crash, never silent loss."""
     if not message_ids:
         return
@@ -403,47 +286,10 @@ def _store_seen(games_dir, message_ids):
         db.close()
 
 
-def _turn_attachments(games_dir, outcome, images_cfg):
-    """Phase 3: build the turn's composite image for a turn_email
-    outcome. Returns ([(filename, jpeg, "image/jpeg", content_id)],
-    note_or_None).
-
-    The composite is marked INLINE via Content-ID so the turn email's
-    HTML twin renders it inside the body (Neil's 2026-09-27
-    inline-images requirement); HTML-less clients still see the plain
-    text plus the JPEG as a viewable part.
-
-    Any failure → empty attachments and a note; the text-only turn
-    still sends (§2.6: images never fail a turn). Only turn emails get
-    composites; clarify/nudge/failed stay text-only.
-    """
-    if (not images_cfg) or images_cfg.get("mode") in (None, "off") \
-            or outcome.action != "turn_email":
-        return [], None
-    try:
-        from .images import build_provider, build_turn_composite, ImageError
-        provider = build_provider(images_cfg.get("mode"),
-                                  api_key=images_cfg.get("api_key"),
-                                  hf_token=images_cfg.get("hf_token"))
-        if provider is None:
-            return [], None
-        comp = build_turn_composite(games_dir, outcome.guid,
-                                    outcome.turn_no, provider)
-        return ([(f"turn-{outcome.turn_no}-composite.jpg", comp["jpeg"],
-                  "image/jpeg", COMPOSITE_CID)],
-                f"composite attached ({comp['time_of_day']}, "
-                f"ref={'kept' if comp['character_ref_used'] else 'new'})")
-    except Exception as e:
-        # log, never raise: text carries the complete turn
-        logging.getLogger("atfl.mailer").warning(
-            "images skipped for guid=%s turn=%s: %s",
-            outcome.guid, outcome.turn_no, e)
-        return [], f"images skipped ({type(e).__name__}: {e})"
-
-
-def run_poll_cycle(games_dir, gmail, gm, game_address=GAME_ADDRESS,
-                   seen_ids=None, turn_len_min=60, images=None):
-    """One full mailer cycle: poll -> dispatch -> send -> mark read.
+def run_poll_cycle(games_dir, gm, engine_node, murph_node, node_root,
+                   seen_ids=None, turn_len_min=60, images=None,
+                   relay=None, agents_dir=None):
+    """One full relay cycle: poll -> dispatch -> hand off -> consume.
 
     images: {"mode": "off"/"stub"/"real"/"hf", "api_key": ...,
              "hf_token": ...} or None.
@@ -452,96 +298,242 @@ def run_poll_cycle(games_dir, gmail, gm, game_address=GAME_ADDRESS,
 
     seen_ids persists across cycles within a process; the on-disk
     seen-set (mailer.db in games_dir) persists across restarts, so a
-    message that was processed but never marked read never runs a
+    forward that was processed but never consumed never runs a
     duplicate turn. Crash between processing and the seen-record means
-    at-least-once re-dispatch — the audit log shows the duplicate.
+    at-least-once re-dispatch — the audit log shows the duplicate. A
+    handoff failure raises: the seen-set is NOT stored and the inbox
+    file is NOT consumed, so the next cycle retries the same inbound
+    (Murph's replay guard dedupes the turn if the first tell landed).
     Returns {"outcomes": [...], "sent": [...], "nudged": [...]}."""
     from .dispatch import dispatch_batch  # local import: mailer is dispatch's client
+    relay = _relay if relay is None else relay
     seen = set() if seen_ids is None else seen_ids
     seen |= _load_seen(games_dir)
-    inbound = poll_inbox(gmail, game_address, skip_ids=seen)
-    fresh = [m for m in inbound if m["id"] not in seen]
-    for m in fresh:
+    pairs = poll_inbox(engine_node, skip_ids=seen, agents_dir=agents_dir,
+                       relay=relay)
+    fresh = [(m, p) for (m, p) in pairs if m["id"] not in seen]
+    for m, _ in fresh:
         seen.add(m["id"])
 
     outcomes = dispatch_batch(games_dir,
                               [{"sender": m["sender"], "subject": m["subject"],
-                                "body": m["body"]} for m in fresh],
+                                "body": m["body"]} for m, _ in fresh],
                               gm, turn_len_min)
     sent = []
-    by_sender = {}
-    for m, out in zip(fresh, outcomes):
-        by_sender.setdefault(m["sender"], []).append((m, out))
-    for m, out in zip(fresh, outcomes):
-        if out.guid and m.get("attachments"):
-            log_attachments(games_dir, out.guid, m)
-        attachments, img_note = _turn_attachments(games_dir, out, images)
-        sent_id = send_outcome(games_dir, gmail, out, m, game_address,
-                               attachments=attachments)
+    for (m, path), out in zip(fresh, outcomes):
+        handed_off, img_note = send_outcome(
+            games_dir, out, m, murph_node, node_root, images=images,
+            relay=relay)
         note = "; ".join(n for n in (out.note, img_note) if n) or None
         sent.append({"sender": out.sender, "action": out.action,
                      "guid": out.guid, "turn_no": out.turn_no,
-                     "message_id": sent_id, "note": note})
+                     "handoff": handed_off, "note": note})
         try:
-            gmail.mark_read(m["id"])
+            relay.consume_inbound(path, engine_node, agents_dir=agents_dir)
         except Exception:
-            pass  # read-marking is best-effort; the turn already ran
-    _store_seen(games_dir, [m["id"] for m in fresh])
+            pass  # seen-set covers it; the file just re-polls once
+    _store_seen(games_dir, [m["id"] for m, _ in fresh])
     return {"outcomes": outcomes, "sent": sent,
-            "nudged": maybe_nudge(games_dir, gmail, game_address=game_address)}
+            "nudged": maybe_nudge(games_dir, murph_node, node_root,
+                                  relay=relay)}
 
 
-class FakeGmail(GmailClient):
-    """In-memory Gmail stand-in for tests. Inbound mail is queued with
-    queue_inbound(); sent mail lands in `outbox` as decoded RFC822."""
+class FakeGmail:
+    """In-memory Murph-side stand-in for tests. (The name is historical —
+    it used to fake Gmail; now it fakes the relay's Murph side.)
 
-    def __init__(self, game_address=GAME_ADDRESS):
-        self.game_address = game_address
-        self.inbox = []   # normalized inbound dicts
-        self.outbox = []  # {"raw": bytes, "parsed": EmailMessage, "id": str}
-        self.read_ids = set()
+    Inbound: queue_inbound() ≈ Murph forwarding a player mail. The stored
+    dicts are exactly normalize_inbound-shaped (thread_id and
+    header_message_id None, attachments [], ink-style id), so the key
+    set matches server/murph_relay.py's pinned inbound contract.
+    Outbound: send_outbound() records envelopes in `outbox` instead of
+    shelling `a8s tell`; consume_inbound() drops files from the inbox.
+    """
+
+    def __init__(self, murph_node="murph", engine_node="atfl-server"):
+        self.murph_node = murph_node
+        self.engine_node = engine_node
+        self.inbox = []   # normalized inbound dicts, unconsumed
+        self.trash = []   # consumed inbound dicts
+        self.outbox = []  # {"envelope", "murph_node", "node_root"}
         self._next = 1000
 
-    def queue_inbound(self, sender, subject, body,
-                      header_message_id=None, attachments=(),
-                      date=None):
-        mid = f"in-{self._next}"
+    def queue_inbound(self, sender, subject, body):
+        mid = f"ink-{self._next}"
         self._next += 1
         self.inbox.append({
-            "id": mid, "thread_id": f"th-{mid}",
-            "header_message_id": header_message_id or f"<{mid}@fake>",
-            "from": sender, "to": self.game_address, "subject": subject,
-            "date": date or _utcnow_iso(), "body": body,
-            "sender": sender, "attachments": list(attachments),
+            "id": mid, "thread_id": None, "header_message_id": None,
+            "from": sender, "to": "murph@inkboxmail.com",
+            "subject": subject, "date": _utcnow_iso(), "body": body,
+            "sender": sender.strip().lower(), "attachments": [],
             "label_ids": ["INBOX", "UNREAD"]})
         return mid
 
-    # -- GmailClient interface --
-    def list(self, query, max_results=50, page_token=None):
-        msgs = [{"id": m["id"], "threadId": m["thread_id"]}
-                for m in self.inbox
-                if "UNREAD" in m.get("label_ids", [])][:max_results]
-        return {"messages": msgs}
+    # -- relay transport contract --
+    @staticmethod
+    def normalize_inbound(envelope):
+        return envelope  # queue_inbound already yields normalized dicts
 
-    def get(self, message_id):
-        for m in self.inbox:
-            if m["id"] == message_id:
-                return dict(m)
-        raise KeyError(message_id)
+    build_outbound_envelope = staticmethod(
+        _relay.build_outbound_envelope)  # the pinned builder, verbatim
 
-    def send(self, raw_b64):
-        raw = base64.urlsafe_b64decode(raw_b64.encode())
-        parsed = _MSG.parsebytes(raw)
-        sid = f"out-{self._next}"
-        self._next += 1
-        self.outbox.append({"raw": raw, "parsed": parsed, "id": sid})
-        # Faithful to the real adapter: message_id is the RFC Message-ID
-        # of what was actually sent (build_raw sets it explicitly).
-        return {"id": sid, "threadId": parsed.get("Thread-Index", sid),
-                "message_id": parsed["Message-ID"]}
+    def poll_inbound(self, engine_node, agents_dir=None):
+        return [(m, m["id"]) for m in self.inbox]
 
-    def mark_read(self, message_id):
-        self.read_ids.add(message_id)
-        for m in self.inbox:
-            if m["id"] == message_id and "UNREAD" in m["label_ids"]:
-                m["label_ids"].remove("UNREAD")
+    def consume_inbound(self, source_id, engine_node, agents_dir=None):
+        kept = [m for m in self.inbox if m["id"] != source_id]
+        self.trash.extend(m for m in self.inbox if m["id"] == source_id)
+        self.inbox = kept
+
+    def send_outbound(self, envelope, murph_node, node_root):
+        missing = [f for f in _relay.OUTBOUND_FIELDS if f not in envelope]
+        if missing:
+            raise _relay.A8STransportError(
+                f"atfl_outbound envelope missing fields: {missing}")
+        if envelope.get("kind") != _relay.OUTBOUND_KIND:
+            raise _relay.A8STransportError("not an atfl_outbound envelope")
+        self.outbox.append({"envelope": dict(envelope),
+                            "murph_node": murph_node,
+                            "node_root": node_root})
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Selftest — the relay-edition mailer contract as an executable spec
+# ---------------------------------------------------------------------------
+def _check(name, cond):
+    print(("PASS " if cond else "FAIL ") + name)
+    if not cond:
+        raise SystemExit(f"selftest failed: {name}")
+
+
+def selftest():
+    import tempfile
+    from . import schema as _schema
+    from .dispatch import DispatchOutcome
+    from .gm import MockGM
+
+    tmp = tempfile.mkdtemp(prefix="mailer-relay-")
+    relay = FakeGmail()
+
+    # A game row for the direct send_outcome checks (in real flows the
+    # dispatch signup creates the DB; here we seed it by hand).
+    gdb = _schema.create_db(os.path.join(tmp, "guid-1.db"))
+    gdb.execute(
+        "INSERT INTO games (guid, player_email, scenario_id, status)"
+        " VALUES (?,?,?,?)",
+        ("guid-1", "player@example.com", "fog-line-mystery-v1", "active"))
+    gdb.commit()
+    gdb.close()
+
+    # -- poll_inbox: skip + shape --
+    mid1 = relay.queue_inbound("Player@Example.com", "[ATFL ab12cd34] hi",
+                               "start")
+    mid2 = relay.queue_inbound("other@example.com", "above the fog line",
+                               "start too")
+    pairs = poll_inbox("atfl-server", relay=relay)
+    _check("poll: two forwards polled with source tokens",
+           len(pairs) == 2 and all(p[1] for p in pairs))
+    m1 = pairs[0][0]
+    _check("poll: normalized keys == murph_relay pinned key set",
+           set(m1.keys()) == {"id", "thread_id", "header_message_id",
+                               "from", "to", "subject", "date", "body",
+                               "sender", "attachments", "label_ids"})
+    _check("poll: sender lowercased, subject verbatim",
+           m1["sender"] == "player@example.com"
+           and m1["subject"].startswith("[ATFL"))
+    _check("poll: skip_ids honored",
+           poll_inbox("atfl-server", skip_ids={mid1}, relay=relay)[0][0]["id"]
+           == mid2)
+
+    # -- send_outcome: turn_email hands off, records, stats --
+    out = DispatchOutcome("turn_email", "player@example.com",
+                          subject="[ATFL ab12cd34] Above the Fog Line",
+                          body="narrative", guid="guid-1", turn_no=3,
+                          html="<p>narrative</p> [[TURN_COMPOSITE]]")
+    handed, note = send_outcome(tmp, out, m1, "murph", "/node/root",
+                                images={"mode": "off"}, relay=relay)
+    _check("send: turn_email hands off", handed is True)
+    env = relay.outbox[-1]["envelope"]
+    _check("send: envelope is the pinned atfl_outbound set",
+           set(env.keys()) == set(_relay.OUTBOUND_FIELDS)
+           and env["game_guid"] == "guid-1" and env["turn_no"] == 3
+           and env["to"] == "player@example.com")
+    _check("send: images off -> no composite, marker dropped from html",
+           env["attachments"] == []
+           and "[[TURN_COMPOSITE]]" not in env["body_html"])
+    _check("send: told the configured murph node from node root",
+           relay.outbox[-1]["murph_node"] == "murph"
+           and relay.outbox[-1]["node_root"] == "/node/root")
+
+    # -- send_outcome: clarify gets a distinct replay key + fresh_thread --
+    out_c = DispatchOutcome("clarify", "player@example.com",
+                            subject="[ATFL] Couldn't match your game",
+                            body="clarify body", guid="guid-1",
+                            html="<p>clarify</p>")
+    handed_c, _ = send_outcome(tmp, out_c, m1, "murph", "/node/root",
+                               relay=relay)
+    env_c = relay.outbox[-1]["envelope"]
+    _check("send: clarify hands off with stable distinct replay key",
+           handed_c is True
+           and env_c["turn_no"] == f"clarify-{mid1}")
+    _check("send: clarify carries fresh_thread advisory",
+           env_c.get("fresh_thread") is True
+           and env_c["attachments"] == [])
+
+    # -- send_outcome: failed/ignored hand off nothing --
+    for action in ("failed", "ignored"):
+        n0 = len(relay.outbox)
+        handed_f, _ = send_outcome(
+            tmp, DispatchOutcome(action, "p@e.c", guid="guid-1"), m1,
+            "murph", "/node/root", relay=relay)
+        _check(f"send: {action} hands off nothing",
+               handed_f is False and len(relay.outbox) == n0)
+
+    # -- run_poll_cycle: end to end with MockGM, then idempotent re-run --
+    relay2 = FakeGmail()
+    gm = MockGM()
+    relay2.queue_inbound("newplayer@example.com", "above the fog line",
+                         "I want to play")
+    r1 = run_poll_cycle(tmp, gm, "atfl-server", "murph", "/node/root",
+                        images={"mode": "off"}, relay=relay2)
+    _check("cycle: one inbound -> one signup turn handed off",
+           len(r1["sent"]) == 1 and r1["sent"][0]["handoff"] is True
+           and r1["sent"][0]["action"] == "turn_email")
+    _check("cycle: inbox consumed",
+           relay2.poll_inbound("atfl-server") == [])
+    r2 = run_poll_cycle(tmp, gm, "atfl-server", "murph", "/node/root",
+                        images={"mode": "off"}, relay=relay2)
+    _check("cycle: re-run sends nothing new (seen-set + consumed)",
+           r2["sent"] == [] and relay2.outbox and True)
+    seen = _load_seen(tmp)
+    _check("cycle: seen-set persisted the inkbox id",
+           len(seen) == 1 and next(iter(seen)).startswith("ink-"))
+
+    # -- maybe_nudge: 24h gate, nudge replay key shape --
+    guid = r1["sent"][0]["guid"]
+    n0 = len(relay2.outbox)
+    _check("nudge: fresh game gets no nudge (handoff < 24h ago)",
+           maybe_nudge(tmp, "murph", "/node/root", relay=relay2) == []
+           and len(relay2.outbox) == n0)
+    db = _open_game_db(tmp, guid)
+    old = (datetime.now(timezone.utc)
+           - timedelta(hours=25)).isoformat()
+    db.execute("UPDATE games SET last_email_at=? WHERE guid=?",
+               (old, guid))
+    db.commit()
+    db.close()
+    nudged = maybe_nudge(tmp, "murph", "/node/root", relay=relay2)
+    nenv = relay2.outbox[-1]["envelope"]
+    _check("nudge: stale game nudged once, replay key is nudge-<date>",
+           len(nudged) == 1 and nudged[0]["guid"] == guid
+           and nenv["turn_no"].startswith("nudge-")
+           and nenv["attachments"] == [])
+    _check("nudge: second sweep quiet (last_email_at advanced)",
+           maybe_nudge(tmp, "murph", "/node/root", relay=relay2) == [])
+
+    print("\nmailer relay selftest: all checks green.")
+
+
+if __name__ == "__main__":
+    selftest()

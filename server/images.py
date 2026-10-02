@@ -13,7 +13,7 @@ Mirrors the Phase 2 stub-then-real pattern:
     in the URL, so it can't leak through logs/proxies), one retry on
     transport/5xx, reference-image support for the selfie.
   - `build_provider(mode, api_key)` — mode "real" raises until the key
-    exists (loud refusal, same as config.py's ATFL_GAME_ADDRESS rule).
+    exists (loud refusal, same as config.py's ATFL_MURPH_NODE rule).
 
 Secrecy shape: prompt builders take ONLY the filtered world view
 (turn_loop.filtered_view — physical state, never hidden_traits, never

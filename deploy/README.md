@@ -11,9 +11,8 @@ the games dir (game SQLite files + mailer.db).
 |---|---|
 | `/srv/atfl/atfl` | git checkout of github.com/neilobremski/atfl |
 | `/srv/atfl/venv` | Python venv (requirements.txt installed) |
-| `/var/lib/atfl/games` | game SQLite files + `mailer.db` (per-game thread state + seen-set) |
-| `/etc/atfl/atfl.env` | service env: ATFL_GAME_ADDRESS, ATFL_POLL_MIN, ATFL_TURN_LEN_MIN, ATFL_GM, ATFL_GAMES_DIR, ATFL_TOKEN_PATH, ATFL_IMAGES, ATFL_IMAGE_API_KEY, ATFL_HF_TOKEN |
-| `/etc/atfl/token.json` | authorized_user OAuth JSON for the game's Gmail account (0600, `atfl:atfl`) |
+| `/var/lib/atfl/games` | game SQLite files + `mailer.db` (handoff bookkeeping + seen-set) |
+| `/etc/atfl/atfl.env` | service env: ATFL_MURPH_NODE, ATFL_A8S_NODE, ATFL_A8S_NODE_ROOT, ATFL_POLL_MIN, ATFL_TURN_LEN_MIN, ATFL_GM, ATFL_GAMES_DIR, ATFL_IMAGES, ATFL_IMAGE_API_KEY, ATFL_HF_TOKEN |
 | `/etc/systemd/system/atfl.service` | the unit (this dir's `atfl.service`) |
 
 ## One-time setup (as opc, over SSH)
@@ -61,20 +60,19 @@ sudo -u atfl a8s add atfl-server /srv/atfl/a8s/atfl-server
 Then `/etc/atfl/atfl.env` (600, `root:atfl`):
 
 ```
-ATFL_GAME_ADDRESS=<the game's address, once OQ#1 closes>
+# Relay edition 2026-10-02: the engine sends no email directly. It hands
+# atfl_outbound envelopes to Murph's A8S node (ATFL_MURPH_NODE) and polls
+# its own A8S inbox (ATFL_A8S_NODE) for Murph's atfl_inbound forwards.
+ATFL_MURPH_NODE=murph
+ATFL_A8S_NODE=atfl-server
+ATFL_A8S_NODE_ROOT=/srv/atfl/a8s/atfl-server
 ATFL_POLL_MIN=5
 ATFL_TURN_LEN_MIN=60
 ATFL_GM=mock
 ATFL_GAMES_DIR=/var/lib/atfl/games
-ATFL_TOKEN_PATH=/etc/atfl/token.json
-# Roster backend (flip ATFL_GM to roster only for the dry run):
-# the mailbox node RosterGM sends from. ATFL_A8S_NODE_ROOT is REQUIRED
-# when ATFL_GM=roster (startup refuses without it); unused for mock.
-ATFL_A8S_NODE=atfl-server
-ATFL_A8S_NODE_ROOT=/srv/atfl/a8s/atfl-server
 # Phase 3 images (composite per turn email): off | stub | real | hf.
 # 'stub' wires deterministic placeholder panels (dev); 'real' (Gemini,
-# deprioritized — paid direction retired 2026-09-29) needs the key (OQ#6);
+# deprioritized — paid direction retired 2026-09-29) needs the key;
 # 'hf' is the no-cost HuggingFace Inference path and needs ATFL_HF_TOKEN.
 # Both 'real' and 'hf' refuse to start without their key.
 ATFL_IMAGES=off
@@ -82,12 +80,9 @@ ATFL_IMAGE_API_KEY=
 ATFL_HF_TOKEN=
 ```
 
-`/etc/atfl/token.json`: the game's Gmail `authorized_user` OAuth JSON
-(gmail.modify scope), 0600 owned by `atfl:atfl`. The OAuth consent is a
-one-time interactive step Neil does with the game's Google account —
-**the server never stores passwords**, and Murph must not touch Neil's
-mailbox for this (boundaries: no credential handling beyond the token
-file Neil provides).
+The relay needs no credentials on the engine side at all: the game's
+mail identity (murph@inkboxmail.com) is Murph's operational detail, and
+the A8S transport uses the node's local mailbox, not OAuth.
 
 Install the unit, then enable + start:
 
@@ -118,12 +113,12 @@ finishes its current cycle on SIGTERM, systemd waits).
 
 **5 minutes.** Rationale: DESIGN.md §1.2 says the server polls "every
 few minutes" while play is ~one turn per player per day. 5 min keeps
-signups and replies feeling alive without busy-looping the API — 288
-cheap `messages.list` calls/day is noise against the Gmail budget, and
-each `messages.get` runs only for unseen ids (quota-light by design,
-session #12). The 24h standalone-nudge window is orthogonal (§2.3) —
-cadence doesn't touch it. Revisit toward 1-2 min only if multiplayer
-makes turn latency feel sluggish in playtest.
+signups and replies feeling alive without busy-looping — 288 cheap A8S
+inbox dir scans/day, and each forward is dispatched only for unseen
+inkbox ids (quota-light by design, session #12). The 24h
+standalone-nudge window is orthogonal (§2.3) — cadence doesn't touch it.
+Revisit toward 1-2 min only if multiplayer makes turn latency feel
+sluggish in playtest.
 
 ## Backups
 

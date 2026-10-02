@@ -123,11 +123,30 @@ never polls a mailbox. Decisions (2026-09-30):
    (22/22 selftest green) — normalize_inbound (the pinned #74 contract),
    build_outbound_envelope + base64-ascii wire form, poll_inbound over
    the node's a8s inbox dir, consume_inbound -> trash/, send_outbound
-   via `a8s tell` with TELL_OUTBOX_DIR + retry-once-then-loud. What
-   remains is the mailer.py/config.py/DESIGN.md §1/§5.3 rewrite to USE it.
+   via `a8s tell` with TELL_OUTBOX_DIR + retry-once-then-loud.
+   DONE 2026-10-02 (#79): mailer.py relay edition — GmailClient/build_raw/
+   extract_text_body deleted, poll_inbox polls the engine's A8S inbox via
+   the relay contract, send_outcome hands atfl_outbound envelopes to
+   send_outbound (turn_email with composite, clarify with
+   turn_no="clarify-<inkbox id>" + fresh_thread advisory, nudge with
+   turn_no="nudge-<UTC date>"), maybe_nudge hands off too, thread_message_id/
+   thread_refs bookkeeping removed (last_email_at keeps the nudge gate),
+   send_ms now measures the handoff, FakeGmail reshaped as the Murph-side
+   test double (murph_relay.py's 22/22 selftest still green against it),
+   new mailer selftest 20/20 green. gmail_adapter.py deleted.
 2. Rewrite `server/config.py` per the decisions above; update the systemd
    EnvironmentFile template in `deploy/`.
+   DONE 2026-10-02 (#79): ATFL_GAME_ADDRESS + ATFL_TOKEN_PATH deleted;
+   ATFL_MURPH_NODE added (default "murph", blank refuses); ATFL_A8S_NODE_ROOT
+   now required unconditionally (the send path needs it); deploy/atfl.service
+   comment, deploy/README.md env table + atfl.env template, and
+   deploy/bootstrap-free-micro-1.sh updated to the relay env.
 3. Rewrite DESIGN.md §1 + §5.3 to describe the relay.
+   DONE 2026-10-02 (#79): §1.1 identity = no engine email identity (players
+   email murph@inkboxmail.com), A8S envelope transport, Murph-owned
+   threading; §1.2 poll cadence = A8S inbox; §5.3 all three system email
+   types as handoff envelopes (nudge/clarify/death), clarify fresh_thread
+   advisory noted, threading bullet retired.
 4. Murph-side: implement the inbox filter + forwarding + thread-state file
    (my operational half; lives outside this repo).
    DONE 2026-10-02 (#75/#76): inbound `hidden_files/atfl_relay_forwarder.py`
