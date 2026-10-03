@@ -155,6 +155,18 @@ never polls a mailbox. Decisions (2026-09-30):
    per game_guid in `hidden_files/murph_relay_threads.json`, Idempotency-Key
    per guid:turn + sent-ledger replay guard). Wire note: envelope attachment
    "bytes" travels base64-ascii over A8S (sender accepts both forms).
+   DONE 2026-10-02 (#81): outbound consumer
+   `hidden_files/atfl_outbound_consumer.py` (24/24 selftest green) — scans
+   ~/filedrops/murph/.inbox/*.json (+ the agents/murph/inbox detached path)
+   for tells whose content is a wire-form atfl_outbound envelope (positive
+   kind check only; all other mail untouched), runs each through the sender
+   (dry-run default, --send to post), moves handled blobs to
+   .trash-atfl-outbound/, malformed envelopes to .quarantine-atfl-outbound/,
+   leaves the blob in place and aborts loudly on API failure. Verified
+   against a real engine build_outbound_envelope -> envelope_for_wire blob
+   (jpeg bytes intact, blob trashed) and a live dry-run over 189 real inbox
+   tells (all ignored, nothing moved). Next: give the consumer a runner
+   (cron or message-poller hook) before the first real playtest turn.
 
 ## For Neil's eye (batched to the digest)
 
