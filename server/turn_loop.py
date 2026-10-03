@@ -322,9 +322,11 @@ def run_turn(db, player_input, gm, turn_len_min=60):
 
 
 def verify_turn(db, turn_id):
-    """Check §2.5 done criteria 1–3, 5–7 (criterion 4, the outbound
-    email, is not wired — no game address yet). Returns a list of
-    (name, ok_or_skip, note) tuples."""
+    """Check §2.5 done criteria 1–7 (criterion 4, the outbound email, is
+    the relay mailer's handoff record: turn_stats.email_sent_at is set
+    only after send_outbound returns True — the A8S handoff to Murph,
+    not the final player delivery). Returns a list of
+    (name, ok, note) tuples."""
     t = dict(db.execute("SELECT * FROM turns WHERE id=?", (turn_id,)).fetchone())
     g = dict(db.execute("SELECT * FROM games WHERE guid=?", (t["game_guid"],)).fetchone())
     checks = []
@@ -361,15 +363,25 @@ def verify_turn(db, turn_id):
     checks.append(("catch-up lead",
                    missed < 1 or t["narrative"].startswith("While you were quiet:"),
                    f"{missed} missed frame(s) before turn {t['turn_no']}"))
-    checks.append(("outbound email", "skip",
-                   "not wired — game address pending (open question #1)"))
+    # §6.3 dogfooding stats row: recorded by run_turn, send stats by mailer
+    stats = db.execute("SELECT * FROM turn_stats WHERE turn_id=?",
+                       (turn_id,)).fetchone()
+    # §2.5 criterion 4: the relay mailer sets turn_stats.email_sent_at
+    # ONLY after send_outbound returns (the A8S handoff to Murph) —
+    # never on failure, never for clarify/nudge. So the timestamp is
+    # the engine's whole record of "the turn email left this machine";
+    # the final player delivery is audited on Murph's side (sent-ledger).
+    checks.append(("outbound email",
+                   stats is not None and bool(stats["email_sent_at"]),
+                   f"handed off at {stats['email_sent_at']} "
+                   f"(send_ms={(stats['send_ms'] or 0):.1f}ms)"
+                   if stats and stats["email_sent_at"]
+                   else "no handoff recorded — the turn email never left "
+                        "the engine (mailer's send_outcome did not run)"))
     hp = json.loads(_row(db, "actors", "player")["physical_state"]).get("hp", 1.0)
     checks.append(("death handling",
                    (hp <= 0) == (g["status"] == "dead"),
                    f"hp={hp}, status={g['status']}"))
-    # §6.3 dogfooding stats row: recorded by run_turn, send stats by mailer
-    stats = db.execute("SELECT * FROM turn_stats WHERE turn_id=?",
-                       (turn_id,)).fetchone()
     stats_ok = (stats is not None and stats["secrecy_pass"] == 1
                 and stats["mutations_count"] == len(muts))
     checks.append(("turn stats row (§6.3)", stats_ok,

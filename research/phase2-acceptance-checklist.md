@@ -39,7 +39,9 @@ Legend:
 
 **Turn flow**
 - One reply = exactly one turn, five steps, §2.5 done criteria:
-  **PROVEN** — verify_turn asserts 6 of 7 (outbound email skips until #1).
+  **PROVEN** — verify_turn asserts all 7 (outbound email =
+  turn_stats.email_sent_at handoff record since #89; was a skip until
+  open question #1 closed with the relay mailer).
 - Reply content honored; denied claims get a `no` row with rationale +
   partial effect: **PROVEN** (MockGM drink-yes / fell-tree-no cases in
   world_state_demo). Natural-language intent parsing quality: **LIVE (#2)**.

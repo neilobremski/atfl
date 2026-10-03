@@ -4,13 +4,17 @@
 Exercises server.turn_loop.run_turn() — the shared five-step pipeline
 from DESIGN.md §2.2 — against the fog-line-mystery-v1 seed, using the
 MockGM. Runs three turns: a drink, an impossible feat (denied with a
-partial effect), and an idle turn (to exercise the §2.4 catch-up lead),
-then prints the mutations ledger and the §2.5 done-criteria check.
+partial effect), and an idle turn (to exercise the §2.4 catch-up lead).
+After each turn the mailer hands the turn email to Murph through the
+FakeGmail relay stand-in, so verify_turn also proves §2.5 criterion 4
+(the outbound handoff) end to end — the demo DB is file-backed so the
+mailer's bookkeeping lands in the same file the demo reads.
 
 Run from the repo root: python3 prototype/world_state_demo.py
 """
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -18,12 +22,34 @@ from server.schema import create_db
 from server.seed import seed
 from server.gm import MockGM, DEMO_PLOT_PICK
 from server.turn_loop import run_turn, verify_turn, TurnFailed
+from server.dispatch import DispatchOutcome
+from server.mailer import send_outcome, FakeGmail
+
+
+GUID = "GUID-FOG-0001"
+SENDER = "neil@example.com"
+
+
+def hand_off(games_dir, relay, r):
+    """Mirror the dispatch -> mailer step: wrap the finished turn in a
+    turn_email outcome and hand the envelope to Murph (FakeGmail here).
+    Mirrors server/dispatch.py's turn path."""
+    outcome = DispatchOutcome(
+        "turn_email", SENDER,
+        subject=f"[ATFL {GUID[:8]}] Above the Fog Line",
+        body=r.narrative, guid=GUID, turn_no=r.turn_no)
+    handed_off, _note = send_outcome(games_dir, outcome, inbound=None,
+                                     murph_node="murph", node_root=games_dir,
+                                     relay=relay)
+    assert handed_off, f"turn {r.turn_no} email was not handed off"
 
 
 def main():
-    db = create_db()
-    seed(db, "GUID-FOG-0001", "neil@example.com")
+    games_dir = tempfile.mkdtemp(prefix="atfl-demo-")
+    db = create_db(os.path.join(games_dir, f"{GUID}.db"))
+    seed(db, GUID, SENDER)
     gm = MockGM()
+    relay = FakeGmail()
 
     for player_input in [
         "I pick up the water bottle and drink deeply.",
@@ -35,6 +61,7 @@ def main():
         except TurnFailed as e:
             print(f"turn failed (no fiction sent): {e}")
             break
+        hand_off(games_dir, relay, r)
         print(f"--- turn {r.turn_no} (game clock {r.game_clock_start} -> {r.game_clock_end} min) ---")
         print(f'player: "{player_input}"')
         print(f"narrative: {r.narrative}\n")
@@ -60,7 +87,7 @@ def main():
             " mutations_count, send_ms, email_sent_at FROM turn_stats ORDER BY turn_id"):
         print(f"  turn {row[0]}: adjudicate={row[1]:.2f}ms narrative={row[2]:.2f}ms "
               f"secrecy={'pass' if row[3] else 'FAIL'} mutations={row[4]} "
-              f"send_ms={row[5]} sent_at={row[6]} (not wired — no game address yet)")
+              f"send_ms={row[5]} sent_at={row[6]}")
 
     g = dict(db.execute("SELECT * FROM games").fetchone())
     assert g["plot_concept"] == DEMO_PLOT_PICK, "plot pick not recorded"
@@ -73,6 +100,7 @@ def main():
                ('{"hp": 0, "fatigue": 0, "hunger": 0}',))
     db.commit()
     r = run_turn(db, "I throw myself off the trail into the fog.", gm)
+    hand_off(games_dir, relay, r)
     g = dict(db.execute("SELECT * FROM games").fetchone())
     assert r.game_over and g["status"] == "dead" and g["ended_at"], \
         f"death not recorded: status={g['status']}"

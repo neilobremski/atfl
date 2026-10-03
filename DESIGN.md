@@ -161,8 +161,10 @@ A turn is done only when ALL of these hold:
 3. Clock advanced: `games.game_clock_min` and `games.turn_no`
    incremented; all touched rows' `last_*_turn` stamped to the new turn.
 4. Outbound email: exactly one sent (the turn email; or the standalone
-   nudge if the fallback fired). It carries the `Game code: <GUID>` footer,
-   the `[ATFL <8hex>]` subject tag, and Gmail threading headers.
+   nudge if the fallback fired). It carries the `Game code: <GUID>` footer
+   and the `[ATFL <8hex>]` subject tag; threading rides on the relay's
+   per-game thread (the Gmail threading headers of the pre-relay design
+   were superseded by the 2026-09-30 relay edition).
 5. **Secrecy check**: the rendered narrative contains nothing from
    `hidden_traits`/`plot_concept` (MVP: string-level check against a
    GM-side denylist built from the gathered entities' hidden JSON).
@@ -738,7 +740,9 @@ review. The build passes when every box holds.
   defaults for idle turns; late replies folded into the next turn, never
   dropped; catch-up line leads every turn email.
 - UUID4 lowercase hex GUIDs; `[ATFL <8-hex>]` subject tag; footer
-  `Game code: <GUID>` line; Gmail threading headers preserved.
+  `Game code: <GUID>` line; threading handled by the relay's per-game
+  thread (the "Gmail threading headers" of the pre-relay design were
+  superseded by the 2026-09-30 relay edition).
 - Turn length fixed per scenario, default 60 game-min (`turn_len_min`
   config) — reconciles the design-notes "set the time length" step, which
   is now "advance the clock by the fixed length". Real-world pacing is

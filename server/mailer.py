@@ -506,6 +506,24 @@ def selftest():
                         images={"mode": "off"}, relay=relay2)
     _check("cycle: re-run sends nothing new (seen-set + consumed)",
            r2["sent"] == [] and relay2.outbox and True)
+
+    # -- verify_turn (§2.5): criterion 4 reads the mailer's handoff --
+    # The signup cycle above ran a real turn AND handed its email off
+    # via relay2, so turn_stats.email_sent_at exists for turn 1 — the
+    # new outbound-email check must pass against its own writer.
+    from .turn_loop import verify_turn as _verify_turn
+    nguid = r1["sent"][0]["guid"]
+    vdb = _open_game_db(tmp, nguid)
+    (tid1,) = vdb.execute(
+        "SELECT id FROM turns WHERE game_guid=? AND turn_no=1",
+        (nguid,)).fetchone()
+    vchecks = _verify_turn(vdb, tid1)
+    vdb.close()
+    _check("verify: outbound email check reads the handoff record",
+           ("outbound email", True) in
+           [(n, ok) for n, ok, _note in vchecks])
+    _check("verify: all 7 criteria asserted, none skip",
+           all(state != "skip" for _n, state, _nt in vchecks))
     seen = _load_seen(tmp)
     _check("cycle: seen-set persisted the inkbox id",
            len(seen) == 1 and next(iter(seen)).startswith("ink-"))
