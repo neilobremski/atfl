@@ -217,3 +217,30 @@ never polls a mailbox. Decisions (2026-09-30):
   (murph@inkboxmail.com) and what their first email should say. Wording
   and tone are subjective — needs his read before anything player-facing
   ships. The draft lists the five specific reads wanted.
+
+## End-to-end drill (2026-10-03, session #87)
+
+First complete turn over the real transport, synthetic player
+"write start" (from murph@inkboxmail.com, drill only): `a8s tell
+atfl-server` → S3 bucket → VM daemon wake → inbox_append →
+engine-inbox (deterministic filename) → atfl.service poll cycle →
+dispatch signup (game 2680626c) → MockGM turn 1 (images off) →
+build_outbound_envelope → `a8s tell murph` → S3 → this VM's murph
+daemon → ~/filedrops/murph/.inbox/ blob → atfl_outbound_runner.sh
+(mode=send) → consumer → Inkbox POST → turn email delivered
+("[ATFL 2680626c] Above the Fog Line", turn 1, seeded trailhead
+narrative, `[[TURN_COMPOSITE]]` placeholder as designed with images
+off). Every hop verified by its own record (daemon wake → bridge
+file → poll log "1 inbound processed, 1 handed off" → blob →
+consumer log "sent=1" → mailbox). Drill game DB removed from the VM
+afterward so nudge sweeps never touch it.
+
+LOOPBACK NOTE: a send to the game's own address (murph@inkboxmail.com)
+produces TWO mailbox records — the outbound copy (direction=outbound,
+status=delivered) and, ~1s later, the SES-delivered inbound copy
+(direction=inbound, status=received, new thread). This is NOT an
+Idempotency-Key failure; the client POSTed exactly once (one audit +
+ledger entry). The forwarder's anti-loop (from == own address) already
+excludes the inbound copy from forwarding, so drill/loopback mail can
+never self-trigger a game. Real players will never see this (their
+address != the game's).
