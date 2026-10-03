@@ -127,6 +127,15 @@ standalone-nudge window is orthogonal (§2.3) — cadence doesn't touch it.
 Revisit toward 1-2 min only if multiplayer makes turn latency feel
 sluggish in playtest.
 
+## Operations
+
+`deploy/check-health.sh` — one-shot health check of the deployed engine,
+run from the dev VM (tailnet SSH recipe; Neil's standing grant covers
+this box). Checks only, never remediates: both units active, poll loop
+cycled in the last 15 min with no tracebacks in the journal, engine
+inbox dir present, `a8s health` (S3 remote + atfl-server node OK), and
+games-dir contents as INFO. Exit 0 / SUMMARY: OK when green.
+
 ## Backups
 
 `/var/lib/atfl/games` is the whole world: game files + mailer.db.
