@@ -167,6 +167,22 @@ never polls a mailbox. Decisions (2026-09-30):
    (jpeg bytes intact, blob trashed) and a live dry-run over 189 real inbox
    tells (all ignored, nothing moved). Next: give the consumer a runner
    (cron or message-poller hook) before the first real playtest turn.
+   DONE 2026-10-02 (#83): runner `hidden_files/atfl_outbound_runner.sh`
+   (flock-guarded, mode from `atfl_outbound_runner.mode` = dryrun|send,
+   per-run line in `atfl_outbound_consumer.log`; no cron daemon exists on
+   the sandbox VM, so the runner is designed to be called from the
+   message-poller's step loop — wiring that hook is a main-agent ask).
+   BUG FOUND BY THE DRILL: the sender POSTed to `/api/v1/messages/send`
+   (HTTP 404) — the consumer's 24/24 selftest had enshrined that wrong
+   endpoint. Fixed to the proven mailbox endpoint
+   `POST /api/v1/mail/mailboxes/murph@inkboxmail.com/messages` (same one
+   the working digest sender uses; payload shape identical). Verified by
+   two drills: (1) drain drill, real engine builders -> wire -> tell blob
+   -> consumer --send with fake api (14/14: byte-intact attachment,
+   Idempotency-Key, ledger, thread pin, trash, replay-skip); (2) real-send
+   drill, real sender.send to murph@inkboxmail.com (HTTP 200, new thread
+   d1462ab2-..., confirmed newest outbound message in the mailbox). Mode
+   flipped to `send` after the drills passed.
 
 ## For Neil's eye (batched to the digest)
 
