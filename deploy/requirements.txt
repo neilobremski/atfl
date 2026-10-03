@@ -4,3 +4,8 @@
 google-api-python-client>=2.100
 google-auth-httplib2>=0.1
 google-auth-oauthlib>=1.0
+# Needed for the single-image turn composite (build_turn_composite_v2:
+# SVG map panel rasterized by server/map_svg.py). System libcairo comes
+# from OL9 baseos (verified present on free-micro-1 2026-10-02; no extra
+# repo or dnf needed).
+cairosvg
