@@ -12,8 +12,9 @@ the games dir (game SQLite files + mailer.db).
 | `/srv/atfl/atfl` | git checkout of github.com/neilobremski/atfl |
 | `/srv/atfl/venv` | Python venv (requirements.txt installed) |
 | `/var/lib/atfl/games` | game SQLite files + `mailer.db` (handoff bookkeeping + seen-set) |
-| `/etc/atfl/atfl.env` | service env: ATFL_MURPH_NODE, ATFL_A8S_NODE, ATFL_A8S_NODE_ROOT, ATFL_POLL_MIN, ATFL_TURN_LEN_MIN, ATFL_GM, ATFL_GAMES_DIR, ATFL_IMAGES, ATFL_IMAGE_API_KEY, ATFL_HF_TOKEN |
+| `/etc/atfl/atfl.env` | service env: ATFL_MURPH_NODE, ATFL_A8S_NODE, ATFL_A8S_NODE_ROOT, ATFL_A8S_AGENTS_DIR, ATFL_POLL_MIN, ATFL_TURN_LEN_MIN, ATFL_GM, ATFL_GAMES_DIR, ATFL_IMAGES, ATFL_IMAGE_API_KEY, ATFL_HF_TOKEN |
 | `/etc/systemd/system/atfl.service` | the unit (this dir's `atfl.service`) |
+| `/etc/systemd/system/a8s-atfl-server.service` | A8S node daemon for atfl-server (S3 transport; inbox_append.py bridge feeds the engine's poll_inbound inbox) |
 
 ## One-time setup (as opc, over SSH)
 
@@ -66,6 +67,12 @@ Then `/etc/atfl/atfl.env` (600, `root:atfl`):
 ATFL_MURPH_NODE=murph
 ATFL_A8S_NODE=atfl-server
 ATFL_A8S_NODE_ROOT=/srv/atfl/a8s/atfl-server
+# Inbound bridge 2026-10-03: the a8s node daemon delivers to an attached
+# node by waking its definition's invoke command, NOT by leaving files in
+# the agents inbox dir. atfl-server's definition
+# (deploy/atfl-server-definition.json) runs inbox_append.py, which writes
+# Murph's raw atfl_inbound envelopes here for poll_inbound() to scan.
+ATFL_A8S_AGENTS_DIR=/srv/atfl/a8s/engine-inbox
 ATFL_POLL_MIN=5
 ATFL_TURN_LEN_MIN=60
 ATFL_GM=mock
