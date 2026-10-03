@@ -112,7 +112,17 @@ def main(argv=None):
                  cfg["a8s_node"], cfg["poll_min"], cfg["turn_len_min"],
                  cfg["murph_node"])
 
-    run_once(relay, gm, cfg)
+    # The first cycle gets the same per-cycle protection as every later
+    # one: a loud log line, then the loop continues. (2026-10-03: without
+    # this, a first-cycle crash — e.g. the a8s inbox dir not existing yet
+    # on a fresh deploy — killed the process and flapped the unit every
+    # RestartSec, contradicting this module's "crashes inside a cycle are
+    # logged and the loop continues" contract.)
+    try:
+        run_once(relay, gm, cfg)
+    except Exception:
+        log.error("first cycle failed; loop continues\n%s",
+                  traceback.format_exc())
     if args.once or args.fake:
         return 0
 
