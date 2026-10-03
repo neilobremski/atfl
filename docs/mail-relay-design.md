@@ -244,3 +244,22 @@ ledger entry). The forwarder's anti-loop (from == own address) already
 excludes the inbound copy from forwarding, so drill/loopback mail can
 never self-trigger a game. Real players will never see this (their
 address != the game's).
+
+## Turn-2 continuity drill (2026-10-03, session #90)
+
+Proves the continuation path, not just signup: after the turn-1 drill
+above (new game fde5378c, sender murph@inkboxmail.com), a second
+`a8s tell atfl-server` envelope carried the player's action text plus
+the `Game code: <GUID>` footer. The poll cycle matched it by
+(GUID, sender) — `extract_guid` prefers the footer, UUID fallback —
+ran turn 2 serially under the per-game lock, advanced the game clock
+07:00 → 08:00 (visible in the delivered body), and handed off via the
+same `a8s tell murph` → runner → Inkbox path. DB evidence: `turns`
+holds turn 1 ("write start") and turn 2 (the action text); `turn_stats`
+shows `email_sent_at` set for BOTH turns, so the #89 verify_turn
+outbound-email criterion is green on continuations, not just signups.
+Drill game DB removed from the VM afterward (games dir back to
+mailer.db); drill loopback copies marked read so the input channel
+stays clean. MockGM's placeholder narrative is unchanged — the drill
+tests the machinery (match → adjudicate → advance → handoff), not
+prose quality.
