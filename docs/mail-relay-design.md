@@ -263,3 +263,25 @@ mailer.db); drill loopback copies marked read so the input channel
 stays clean. MockGM's placeholder narrative is unchanged — the drill
 tests the machinery (match → adjudicate → advance → handoff), not
 prose quality.
+
+## Standalone-nudge drill (2026-10-03, session #92)
+
+Proves the idle path over real transport — the one turn-loop leg never
+drilled (signup #87, continuation #90, verify 7/7 #89): after a fresh
+signup drill (new game 7d883792, sender murph@inkboxmail.com, turn 1
+handed off and delivered as usual), `last_email_at` in the drill game
+DB was backdated 25h via `sudo -u atfl python3` on free-micro-1. The
+next poll cycle (22:17:48 UTC) logged "1 nudged": `maybe_nudge` fired,
+the envelope went `a8s tell murph` → filedrops `.inbox` → runner
+(mode=send, sent=1) → Inkbox. Envelope checks: kind=atfl_outbound,
+turn_no=`nudge-2026-10-03` (stable per-day replay key), subject
+`[ATFL 7d883792] Above the Fog Line`, to murph@inkboxmail.com, body the
+placeholder `render_nudge` prose. Nudge email verified landed in the
+mailbox (22:21:08Z). DB evidence: `last_email_at` advanced to the
+handoff time; `turns` holds ONLY turn 1 — the nudge mutated nothing
+(no phantom turn row), per §2.3. The following poll cycle (22:22:48)
+logged "0 nudged" — the 24h gate holds, no double-nudge. Drill game DB
+removed from the VM afterward (games dir back to mailer.db); drill
+loopback copies marked read so the input channel stays clean. Note:
+nudge prose itself remains a review checkpoint (Neil's eye) — the drill
+tests the machinery (gate → envelope → handoff → delivery), not copy.
