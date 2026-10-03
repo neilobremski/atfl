@@ -183,6 +183,32 @@ never polls a mailbox. Decisions (2026-09-30):
    drill, real sender.send to murph@inkboxmail.com (HTTP 200, new thread
    d1462ab2-..., confirmed newest outbound message in the mailbox). Mode
    flipped to `send` after the drills passed.
+5. VM-side deploy wiring (free-micro-1, atfl user) — DONE 2026-10-03 (#86):
+   S3 remote configured in /srv/atfl/.config/a8s/network.json (same
+   ar3-temporary bucket/prefix/profile as the dev VM; AWS credential copied
+   from the dev VM's a8s-s3-storage profile to /srv/atfl/.aws/credentials,
+   0600 — per Neil's standing full-VM-control grant); `python3-pip`
+   installed from baseos+appstream only (limited repos, 1 GiB box) so the
+   a8s-s3 dep group (boto3) could install; `a8s health`: remote s3 OK,
+   atfl-server OK. Node daemon as new unit a8s-atfl-server.service
+   (User=atfl, HOME=/srv/atfl; ExecStart wrapped in /usr/bin/bash because
+   SELinux Enforcing labels /srv/atfl/.ar3 var_t, which the service domain
+   cannot exec directly — 203/EXEC "Permission denied").
+   INBOUND BRIDGE (the gap this closed): the daemon delivers to an attached
+   node by waking its definition's invoke command, never by leaving files in
+   the agents inbox dir that poll_inbound() scans — so the inbound leg had a
+   dead last hop. New deploy/atfl-server-definition.json
+   (invoke: $PYTHON inbox_append.py $MESSAGE, argv-substituted so JSON
+   bodies arrive intact) + deploy/atfl-server-inbox_append.py: writes
+   Murph's raw atfl_inbound envelopes verbatim to
+   <ATFL_A8S_AGENTS_DIR>/atfl-server/inbox/ (new env var in atfl.env =
+   /srv/atfl/a8s/engine-inbox); non-envelope bodies go to dropped/ for
+   inspection; deterministic filenames from inkbox_message_id make
+   duplicate wakes idempotent. Verified live both directions: VM->dev
+   (envelope in ~/filedrops/murph/.inbox/) and dev->VM (bridge file landed,
+   engine's poll_inbound + normalize_inbound read it green via the deployed
+   venv). atfl.service's poll loop now reads the (empty) engine inbox
+   instead of logging the loud "cannot read a8s inbox" error.
 
 ## For Neil's eye (batched to the digest)
 
