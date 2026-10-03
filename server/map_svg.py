@@ -1,0 +1,369 @@
+"""SVG map panel + scene compositing — the single-image turn render.
+
+Promoted 2026-10-02 from prototype/scene_map_overlay_demo.py into server
+code (work session #82). Neil's 2026-10-02 verdict: one image per turn —
+the scene, with the map drawn as SVG and rendered into the raster image
+in the bottom-left corner, whole thing compressed to a JPEG. Selfie is
+cut until scene+map look right.
+
+Geometry contract: layout_map() + _TOD_PALETTE come from server/map_panel,
+so the SVG and the old PIL panel agree byte-for-byte on node positions;
+only the drawing backend changes (PIL -> SVG -> cairo).
+
+Determinism: seeded randomness only, exactly the same seeds as the PIL
+panel, so the SVG byte-stream is stable for a given game state.
+"""
+from __future__ import annotations
+
+import io
+import math
+import os
+import random
+import shutil
+
+from .map_panel import _TOD_PALETTE, _seed, layout_map
+
+# Overlay defaults, decided 2026-10-02 with the proof
+# (hidden_files/scene_map_overlay_proof_20261002.jpg): the map is drawn
+# at its native overlay size — never rendered big and downscaled, or the
+# labels go illegible.
+OVERLAY_PX = 340
+OVERLAY_MARGIN_PX = 28
+
+
+def _sketch_path(p0, p1, seed_text, size, passes=2, jitter=9):
+    """Midpoint-displaced polyline, 2 passes — mirrors map_panel's
+    _sketch_line seeds, so frame/edges match the PIL panel."""
+    out = []
+    for p in range(passes):
+        rng = random.Random(_seed(seed_text) + p * 7919)
+        x0, y0 = p0
+        x1, y1 = p1
+        mid = [((x0 + x1) / 2, (y0 + y1) / 2)]
+        for _ in range(2):
+            new_mid = []
+            prev = p0
+            for mx, my in mid + [p1]:
+                nx, ny = (prev[0] + mx) / 2, (prev[1] + my) / 2
+                j = jitter if p == 0 else jitter * 0.55
+                new_mid.append((nx + rng.uniform(-j, j), ny + rng.uniform(-j, j)))
+                prev = (mx, my)
+            mid = new_mid
+        pts = [p0] + mid + [p1]
+        d = "M " + " L ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+        out.append(d)
+    return out
+
+
+def _sketch_circle_path(center, radius, seed_text):
+    rng = random.Random(_seed(seed_text))
+    pts = []
+    for i in range(24):
+        a = 2 * math.pi * i / 24
+        r = radius + rng.uniform(-radius * 0.12, radius * 0.12)
+        pts.append((center[0] + r * math.cos(a), center[1] + r * math.sin(a)))
+    d = "M " + " L ".join(f"{x:.1f},{y:.1f}" for x, y in pts) + " Z"
+    return d
+
+
+def _wrap(name, width=16):
+    words, lines, cur = name.split(), [], ""
+    for w in words:
+        if len(cur) + 1 + len(w) > width and cur:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = (cur + " " + w).strip()
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _rgb(t):
+    return "#%02x%02x%02x" % t
+
+
+def _esc(s):
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def render_map_svg(places, edges, player_slug, time_of_day="morning", size=1024):
+    """Map as an SVG string. Same inputs/contract as map_panel.render_map.
+
+    Only discovered places are ever drawn (the caller passes the filtered
+    set). Labels get opaque parchment plates — cairosvg ignores
+    paint-order on text, so a stroke halo would not survive rasterization.
+    """
+    if player_slug not in places:
+        raise ValueError(f"player place {player_slug!r} not in places")
+    base, accent, ink = _TOD_PALETTE.get(time_of_day, _TOD_PALETTE["morning"])
+    positions = layout_map(places, edges, size)
+
+    s = []
+    A = s.append
+    A(f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" '
+      f'viewBox="0 0 {size} {size}">')
+    A(f'<rect x="0" y="0" width="{size}" height="{size}" rx="{size * 0.05:.0f}" '
+      f'fill="{_rgb(base)}"/>')
+
+    # double hand-drawn frame
+    m = size * 0.03
+    for d in _sketch_path((m, m), (size - m, m), "frame:n", size, jitter=size * 0.009):
+        A(f'<path d="{d}" stroke="{_rgb(ink)}" stroke-width="4" fill="none" '
+          f'stroke-linecap="round"/>')
+    for d in _sketch_path((size - m, m), (size - m, size - m), "frame:e", size, jitter=size * 0.009):
+        A(f'<path d="{d}" stroke="{_rgb(ink)}" stroke-width="4" fill="none" '
+          f'stroke-linecap="round"/>')
+    for d in _sketch_path((size - m, size - m), (m, size - m), "frame:s", size, jitter=size * 0.009):
+        A(f'<path d="{d}" stroke="{_rgb(ink)}" stroke-width="4" fill="none" '
+          f'stroke-linecap="round"/>')
+    for d in _sketch_path((m, size - m), (m, m), "frame:w", size, jitter=size * 0.009):
+        A(f'<path d="{d}" stroke="{_rgb(ink)}" stroke-width="4" fill="none" '
+          f'stroke-linecap="round"/>')
+    m2 = size * 0.045
+    for (p0, p1, sd) in (((m2, m2), (size - m2, m2), "frame2:n"),
+                         ((size - m2, m2), (size - m2, size - m2), "frame2:e"),
+                         ((size - m2, size - m2), (m2, size - m2), "frame2:s"),
+                         ((m2, size - m2), (m2, m2), "frame2:w")):
+        for d in _sketch_path(p0, p1, sd, size, jitter=size * 0.009):
+            A(f'<path d="{d}" stroke="{_rgb(accent)}" stroke-width="2" fill="none" '
+              f'stroke-linecap="round"/>')
+
+    # edges under nodes
+    for a, b in edges:
+        key = f"edge:{min(a, b)}:{max(a, b)}"
+        for d in _sketch_path(positions[a], positions[b], key, size, jitter=size * 0.009):
+            A(f'<path d="{d}" stroke="{_rgb(ink)}" stroke-width="3" fill="none" '
+              f'stroke-linecap="round"/>')
+
+    # nodes + labels (parchment plates behind wrapped labels)
+    node_r = size * 0.035
+    label_px = max(20, size // 34)
+    for slug, name in places.items():
+        x, y = positions[slug]
+        d = _sketch_circle_path((x, y), node_r, f"node:{slug}")
+        A(f'<path d="{d}" stroke="{_rgb(ink)}" stroke-width="3" fill="none" '
+          f'stroke-linecap="round"/>')
+        lines = _wrap(name, width=max(10, size // 22))
+        est_w = max(len(ln) for ln in lines) * label_px * 0.60
+        est_h = len(lines) * label_px * 1.18
+        plate_y = y + node_r + 6
+        A(f'<rect x="{x - est_w / 2 - 6:.1f}" y="{plate_y - label_px * 0.55:.1f}" '
+          f'width="{est_w + 12:.1f}" height="{est_h + 4:.1f}" rx="6" '
+          f'fill="{_rgb(base)}" fill-opacity="0.94"/>')
+        for i, ln in enumerate(lines):
+            ly = plate_y + label_px * 0.35 + i * label_px * 1.15
+            A(f'<text x="{x:.1f}" y="{ly:.1f}" '
+              f'text-anchor="middle" font-family="\'DejaVu Serif\',serif" '
+              f'font-size="{label_px}" fill="{_rgb(ink)}">{_esc(ln)}</text>')
+
+    # player pin: filled red dot + YOU
+    px, py = positions[player_slug]
+    pin_r = node_r * 0.55
+    pin_px = max(16, size // 46)
+    A(f'<circle cx="{px:.1f}" cy="{py:.1f}" r="{pin_r:.1f}" fill="#b22222" '
+      f'stroke="#5a1010" stroke-width="2"/>')
+    A(f'<text x="{px:.1f}" y="{py - node_r - 6:.1f}" text-anchor="middle" '
+      f'font-family="\'DejaVu Serif\',serif" font-size="{pin_px}" '
+      f'font-weight="bold" fill="#b22222">YOU</text>')
+
+    # time-of-day caption
+    cap_px = max(18, size // 40)
+    A(f'<text x="{size * 0.07:.1f}" y="{size * 0.055 + cap_px:.1f}" '
+      f'text-anchor="start" font-family="\'DejaVu Serif\',serif" '
+      f'font-size="{cap_px}" letter-spacing="2" fill="{_rgb(accent)}">'
+      f'{time_of_day.upper()}</text>')
+    A('</svg>')
+    return "\n".join(s)
+
+
+def rasterize(svg_text, px):
+    """SVG -> PNG bytes at the overlay's native size. cairosvg is
+    imported lazily so the server boots without it (deploy note: needs
+    cairosvg + system cairo on free-micro-1)."""
+    try:
+        import cairosvg
+    except ImportError as e:
+        raise ImageError(f"cairosvg is not installed: {e}") from e
+    return cairosvg.svg2png(bytestring=svg_text.encode("utf-8"),
+                            output_width=px, output_height=px)
+
+
+def composite_scene_map(scene_jpeg_or_png, map_png, overlay_px=OVERLAY_PX,
+                        margin=OVERLAY_MARGIN_PX, quality=80):
+    """Paste the rasterized map onto the scene, bottom-left, with a soft
+    drop shadow. Returns (jpeg_bytes, overlay_box)."""
+    from PIL import Image, ImageDraw, ImageFilter
+    scene = Image.open(io.BytesIO(scene_jpeg_or_png)).convert("RGB")
+    W, H = scene.size
+    map_img = Image.open(io.BytesIO(map_png)).convert("RGBA")
+    if map_img.size != (overlay_px, overlay_px):
+        map_img = map_img.resize((overlay_px, overlay_px), Image.LANCZOS)
+
+    shadow = Image.new("RGBA", (overlay_px + 40, overlay_px + 40), (0, 0, 0, 0))
+    dr = ImageDraw.Draw(shadow)
+    dr.rounded_rectangle([20, 20, 20 + overlay_px, 20 + overlay_px],
+                         radius=int(overlay_px * 0.05), fill=(0, 0, 0, 110))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(10))
+
+    x, y = margin, H - margin - overlay_px
+    scene.paste(shadow, (x - 20 + 7, y - 20 + 10), shadow)
+    scene.paste(map_img, (x, y), map_img)
+
+    buf = io.BytesIO()
+    scene.save(buf, "JPEG", quality=quality)
+    return buf.getvalue(), (x, y, x + overlay_px, y + overlay_px)
+
+
+class ImageError(Exception):
+    """Raised when map SVG rasterization is unavailable. Kept local so
+    map_svg imports without images.py; images.py catches and rewrites it
+    into its own ImageError (same message) for the caller contract."""
+
+
+# ---------------------------------------------------------------------------
+# Selftest — promotion parity: the server build must reproduce the proof
+# ---------------------------------------------------------------------------
+def _check(name, cond, detail=""):
+    print(("PASS " if cond else "FAIL ") + name,
+          ("— " + detail) if detail and not cond else "")
+    if not cond:
+        raise SystemExit(f"selftest failed: {name}")
+
+
+def _proof_state(games_dir, guid):
+    """Seeded game state identical to prototype/scene_map_overlay_demo's
+    main(): turn 1, game clock 07:00 (morning), trail-down discovered,
+    player at trail-down."""
+    import sqlite3 as _sqlite3
+    from .schema import SCHEMA
+    from .seed import seed
+    from .turn_loop import filtered_view
+    from .images import time_of_day_word, SCENARIO_EDGES
+
+    db = _sqlite3.connect(os.path.join(games_dir, f"{guid}.db"))
+    db.row_factory = _sqlite3.Row
+    db.executescript(SCHEMA)
+    seed(db, guid, "player@example.com")
+    db.execute("UPDATE games SET turn_no=1, game_clock_min=60 WHERE guid=?",
+               (guid,))
+    db.execute("UPDATE places SET discovered=1, last_visited_turn=1 "
+               "WHERE slug='trail-down'")
+    db.execute("UPDATE actors SET location_slug='trail-down' WHERE is_player=1")
+    db.commit()
+    view = filtered_view(db, guid)
+    db.close()
+    tod = time_of_day_word(60)
+    player_loc = view["actors"]["player"]["location_slug"]
+    discovered = {s: p["name"] for s, p in view["places"].items()
+                  if p["discovered"]}
+    edges = [(a, b) for a, b in SCENARIO_EDGES
+             if a in discovered and b in discovered]
+    return view, tod, player_loc, discovered, edges
+
+
+def selftest():
+    import sqlite3 as _sqlite3
+    import tempfile
+    import xml.etree.ElementTree as ET
+    from PIL import Image
+
+    HIDDEN = os.path.expanduser(
+        "~/workspace/goals/above-the-fog-line-game-project/hidden_files")
+    PROOF_SVG = os.path.join(HIDDEN, "scene_map_overlay_proof_20261002.svg")
+    PROOF_JPG = os.path.join(HIDDEN, "scene_map_overlay_proof_20261002.jpg")
+    SCENE_SRC = os.path.join(HIDDEN, "hf_e2e_scene.png")  # real 1024 test scene
+
+    games_dir = tempfile.mkdtemp(prefix="atfl-mapsvg-")
+    guid = "mapsvg-selftest"
+    view, tod, player_loc, discovered, edges = _proof_state(games_dir, guid)
+
+    # -- svg renderer parity with the prototype's proof --
+    svg1 = render_map_svg(discovered, edges, player_loc, tod, size=OVERLAY_PX)
+    svg2 = render_map_svg(discovered, edges, player_loc, tod, size=OVERLAY_PX)
+    _check("svg deterministic (same bytes twice)", svg1 == svg2)
+    with open(PROOF_SVG) as f:
+        proof_svg = f.read()
+    _check("server svg byte-identical to the shipped proof svg",
+           svg1 == proof_svg,
+           f"server {len(svg1)}B vs proof {len(proof_svg)}B")
+
+    # -- secrecy: the svg names nothing outside the filtered state --
+    root = ET.fromstring(svg1)
+    texts = [(t.text or "") for t in root.iter() if t.tag.endswith("text")]
+    allowed = set()
+    for name in discovered.values():
+        allowed.update(_wrap(name, width=max(10, OVERLAY_PX // 22)))
+    allowed |= {"YOU", tod.upper()}
+    unknowns = [t for t in texts if t not in allowed]
+    _check("svg names nothing outside filtered state", not unknowns,
+           str(unknowns[:3]))
+
+    # -- rasterize + composite geometry --
+    map_png = rasterize(svg1, OVERLAY_PX)
+    img = Image.open(io.BytesIO(map_png))
+    _check("map raster is overlay size", img.size == (OVERLAY_PX, OVERLAY_PX))
+
+    scene = Image.new("RGB", (1024, 1024), (120, 140, 120))
+    sbuf = io.BytesIO()
+    scene.save(sbuf, "PNG")
+    jpeg, box = composite_scene_map(sbuf.getvalue(), map_png)
+    out = Image.open(io.BytesIO(jpeg))
+    _check("composite jpeg is scene size", out.size == (1024, 1024), str(out.size))
+    _check("overlay box bottom-left at margin",
+           box == (OVERLAY_MARGIN_PX, 1024 - OVERLAY_MARGIN_PX - OVERLAY_PX,
+                   OVERLAY_MARGIN_PX + OVERLAY_PX, 1024 - OVERLAY_MARGIN_PX),
+           str(box))
+
+    # -- full v2 builder end to end with a stub provider --
+    from .images import build_turn_composite_v2
+
+    class Stub:
+        def generate_scene(self, prompt, *, size=1024):
+            _check("scene prompt mentions morning", "morning" in prompt.lower())
+            scene = Image.new("RGB", (size, size), (120, 140, 120))
+            b = io.BytesIO()
+            scene.save(b, "PNG")
+            return b.getvalue()
+
+    res = build_turn_composite_v2(games_dir, guid, 1, Stub())
+    _check("v2 jpeg is 1024x1024",
+           Image.open(io.BytesIO(res["jpeg"])).size == (1024, 1024))
+    _check("v2 returns the builder contract keys",
+           set(res) >= {"jpeg", "scene_prompt", "time_of_day", "overlay_px",
+                        "overlay_box", "prompt_hash", "sent_at"})
+    _check("v2 time_of_day from game clock", res["time_of_day"] == "morning")
+    for kind, ext in (("scene_v2", "jpg"), ("map_svg", "svg"),
+                      ("composite_v2", "jpg")):
+        p = os.path.join(games_dir, "assets", guid, f"turn-1-{kind}.{ext}")
+        _check(f"v2 asset file persisted: turn-1-{kind}.{ext}",
+               os.path.exists(p))
+    db = _sqlite3.connect(os.path.join(games_dir, f"{guid}.db"))
+    rows = db.execute(
+        "SELECT kind FROM assets WHERE turn_created=1").fetchall()
+    db.close()
+    _check("v2 provenance rows in assets table",
+           {r[0] for r in rows} == {"scene_v2", "map_svg", "composite_v2"},
+           str([r[0] for r in rows]))
+
+    # -- proof reproduction: same scene + same state through the server
+    #    pipeline must byte-match the shipped proof jpeg --
+    with open(SCENE_SRC, "rb") as f:
+        proof_scene = f.read()
+
+    class ProofScene:
+        def generate_scene(self, prompt, *, size=1024):
+            return proof_scene
+
+    res2 = build_turn_composite_v2(games_dir, guid, 2, ProofScene())
+    with open(PROOF_JPG, "rb") as f:
+        proof_jpeg = f.read()
+    _check("v2 reproduces the shipped proof jpeg byte-for-byte",
+           res2["jpeg"] == proof_jpeg,
+           f"server {len(res2['jpeg'])}B vs proof {len(proof_jpeg)}B")
+    shutil.rmtree(games_dir, ignore_errors=True)
+    print("\nmap_svg selftest: all checks green.")
+
+
+if __name__ == "__main__":
+    selftest()

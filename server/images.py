@@ -533,13 +533,13 @@ def get_character_ref(games_dir, guid) -> bytes | None:
         return f.read()
 
 
-def _store_asset(games_dir, guid, turn_no, kind, data, prompt):
+def _store_asset(games_dir, guid, turn_no, kind, data, prompt, ext="jpg"):
     """Persist panel bytes under assets/<guid>/ and file the provenance
     row in the game's assets table (the file IS the archive — the games
     dir is the whole backup unit)."""
     os.makedirs(_assets_dir(games_dir, guid), exist_ok=True)
     fname = "character-ref.jpg" if kind == CHARACTER_REF_KIND \
-        else f"turn-{turn_no}-{kind}.jpg"
+        else f"turn-{turn_no}-{kind}.{ext}"
     path = os.path.join(_assets_dir(games_dir, guid), fname)
     with open(path, "wb") as f:
         f.write(data)
@@ -666,6 +666,101 @@ def build_turn_composite(games_dir, guid, turn_no, provider,
         "selfie_prompt": f_prompt,
         "time_of_day": tod,
         "character_ref_used": ref is not None,
+        "prompt_hash": hashlib.sha256(prompt_text.encode()).hexdigest()[:16],
+        "sent_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# -- single-image turn render (v2, DRAFT 2026-10-02) ---------------------------
+
+# Neil's 2026-10-02 verdict: one image per turn — the scene, with the map
+# drawn as SVG and rendered into the raster image in the bottom-left
+# corner, whole thing compressed to a JPEG. Selfie cut until scene+map
+# look right. This builder is a DRAFT: not wired into the turn loop
+# (mailer still calls build_turn_composite v1) until Neil approves the
+# overlay proof (hidden_files/scene_map_overlay_proof_20261002.jpg).
+# Asset kinds carry a "_v2" suffix so draft runs never collide with v1
+# archive files.
+from .map_svg import (  # noqa: E402
+    OVERLAY_MARGIN_PX,
+    OVERLAY_PX,
+    ImageError as MapSvgError,
+    composite_scene_map,
+    rasterize as rasterize_map_svg,
+    render_map_svg,
+)
+
+
+def build_turn_composite_v2(games_dir, guid, turn_no, provider,
+                            size: int = COMPOSITE_PANEL_SIZE,
+                            quality: int = COMPOSITE_JPEG_QUALITY,
+                            overlay_px: int = OVERLAY_PX,
+                            margin: int = OVERLAY_MARGIN_PX) -> dict:
+    """Generate the turn's single image: scene + SVG map overlay.
+
+    Steps: prompt from filtered state (+ game-clock time of day) ->
+    scene from the provider -> map as SVG (native overlay size, from DB
+    truth) -> rasterize -> bottom-left composite with drop shadow ->
+    JPEG -> persist bytes + provenance rows.
+
+    Returns {"jpeg": bytes, "scene_prompt": str, "time_of_day": str,
+             "overlay_px": int, "overlay_box": tuple, "prompt_hash": str}.
+    Raises ImageError on any failure — the caller logs it and sends the
+    text-only turn.
+    """
+    try:
+        db = sqlite3.connect(os.path.join(games_dir, f"{guid}.db"))
+        db.row_factory = sqlite3.Row
+        view = filtered_view(db, guid)
+        g = dict(db.execute("SELECT * FROM games WHERE guid=?", (guid,)).fetchone())
+        db.close()
+    except Exception as e:
+        raise ImageError(f"cannot read game state for images: {e}") from e
+    if not g:
+        raise ImageError(f"no game row for {guid}")
+
+    tod = time_of_day_word(g["game_clock_min"])
+    s_prompt = scene_prompt(view, tod)
+
+    try:
+        player_loc = view["actors"]["player"]["location_slug"]
+        discovered = {s: p["name"] for s, p in view["places"].items()
+                      if p["discovered"]}
+        if not discovered:
+            raise ImageError("no discovered places — nothing to draw")
+        edges = [(a, b) for a, b in SCENARIO_EDGES
+                 if a in discovered and b in discovered]
+
+        svg_text = render_map_svg(discovered, edges, player_loc, tod,
+                                  size=overlay_px)
+        map_png = rasterize_map_svg(svg_text, overlay_px)
+        scene_jpg = provider.generate_scene(s_prompt, size=size)
+    except (ImageError, MapSvgError):
+        raise
+    except Exception as e:
+        raise ImageError(f"v2 image generation failed: {e}") from e
+
+    try:
+        jpeg, box = composite_scene_map(scene_jpg, map_png, overlay_px,
+                                        margin, quality)
+    except Exception as e:
+        raise ImageError(f"v2 composite stitch failed: {e}") from e
+
+    # Provenance: scene + svg + composite land in the assets table under
+    # v2 suffixed kinds. The svg file keeps its .svg extension via the
+    # ext parameter.
+    prompt_text = f"SCENE: {s_prompt}\nMAP_SVG: {overlay_px}px overlay"
+    _store_asset(games_dir, guid, turn_no, "scene_v2", scene_jpg, s_prompt)
+    _store_asset(games_dir, guid, turn_no, "map_svg",
+                 svg_text.encode("utf-8"), prompt_text, ext="svg")
+    _store_asset(games_dir, guid, turn_no, "composite_v2", jpeg, prompt_text)
+
+    return {
+        "jpeg": jpeg,
+        "scene_prompt": s_prompt,
+        "time_of_day": tod,
+        "overlay_px": overlay_px,
+        "overlay_box": box,
         "prompt_hash": hashlib.sha256(prompt_text.encode()).hexdigest()[:16],
         "sent_at": datetime.now(timezone.utc).isoformat(),
     }
