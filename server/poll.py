@@ -49,6 +49,7 @@ def run_once(relay, gm, cfg):
         node_root=cfg["a8s_node_root"],
         turn_len_min=cfg["turn_len_min"],
         images={"mode": cfg["images_mode"],
+                "composite": cfg["composite"],
                 "api_key": cfg["image_api_key"],
                 "hf_token": cfg["hf_token"]},
     )

@@ -159,7 +159,10 @@ ATFL_TURN_LEN_MIN=60
 ATFL_GM=mock
 ATFL_GAMES_DIR=/var/lib/atfl/games
 # Images: off | stub | hf ('hf' needs ATFL_HF_TOKEN; no paid keys)
+# Composite layout: v1 (default) | v2 (single scene + map overlay; the
+# flip is Neil's call once he approves the overlay proof).
 ATFL_IMAGES=off
+ATFL_COMPOSITE=v1
 ATFL_HF_TOKEN=
 EOF
     sudo chmod 600 "$ETC_DIR/atfl.env"

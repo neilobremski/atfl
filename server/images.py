@@ -671,16 +671,19 @@ def build_turn_composite(games_dir, guid, turn_no, provider,
     }
 
 
-# -- single-image turn render (v2, DRAFT 2026-10-02) ---------------------------
+# -- single-image turn render (v2) ---------------------------------------------
 
 # Neil's 2026-10-02 verdict: one image per turn — the scene, with the map
 # drawn as SVG and rendered into the raster image in the bottom-left
 # corner, whole thing compressed to a JPEG. Selfie cut until scene+map
-# look right. This builder is a DRAFT: not wired into the turn loop
-# (mailer still calls build_turn_composite v1) until Neil approves the
-# overlay proof (hidden_files/scene_map_overlay_proof_20261002.jpg).
-# Asset kinds carry a "_v2" suffix so draft runs never collide with v1
-# archive files.
+# look right.
+#
+# WIRED 2026-10-03 (session #91): mailer._turn_composite calls this builder
+# when images_cfg["composite"] == "v2" (ATFL_COMPOSITE=v2 in config,
+# default 'v1'). The FLIP itself is Neil's call — he approves the overlay
+# proof (goal hidden_files/scene_map_overlay_proof_20261002.jpg); until
+# then v2 stays off and v1 ships. Asset kinds carry a "_v2" suffix so
+# draft runs never collide with v1 archive files.
 from .map_svg import (  # noqa: E402
     OVERLAY_MARGIN_PX,
     OVERLAY_PX,

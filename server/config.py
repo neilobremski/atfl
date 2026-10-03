@@ -35,6 +35,14 @@ the free-micro-1 layout; override with env vars locally.
                         'hf' raises until ATFL_HF_TOKEN exists — the no-cost
                         HuggingFace Inference path (recommended,
                         research/phase3-hf-colab-art.md).
+    ATFL_COMPOSITE       'v1' (default) or 'v2'. 'v1' = three-panel composite
+                        (scene, code-drawn map, selfie). 'v2' = single image:
+                        scene with the SVG map rasterized into the bottom-left
+                        corner, no selfie (Neil's 2026-10-02 one-image-per-turn
+                        verdict). The flip is Neil's call — he approves the
+                        overlay proof (goal hidden_files/
+                        scene_map_overlay_proof_20261002.jpg); until then v2
+                        stays off and v1 ships.
     ATFL_IMAGE_API_KEY  key for the real (Gemini) image provider. Deprioritized
                         2026-09-29: Neil ruled out paid image APIs.
     ATFL_HF_TOKEN       free HuggingFace token with the 'inference' scope.
@@ -91,6 +99,11 @@ def load(env=os.environ):
         raise ConfigError(
             f"ATFL_IMAGES must be 'off', 'stub', 'real' or 'hf', "
             f"got {images_mode!r}")
+
+    composite = env.get("ATFL_COMPOSITE", "v1").strip().lower()
+    if composite not in ("v1", "v2"):
+        raise ConfigError(
+            f"ATFL_COMPOSITE must be 'v1' or 'v2', got {composite!r}")
     image_api_key = env.get("ATFL_IMAGE_API_KEY", "").strip() or None
     if images_mode == "real" and not image_api_key:
         raise ConfigError(
@@ -115,6 +128,7 @@ def load(env=os.environ):
         "images_mode": images_mode,
         "image_api_key": image_api_key,
         "hf_token": hf_token,
+        "composite": composite,
     }
 
 

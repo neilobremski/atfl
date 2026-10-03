@@ -187,17 +187,33 @@ def _turn_composite(games_dir, outcome, images_cfg):
     Any failure → (None, note); the text-only turn still sends (§2.6:
     images never fail a turn). Only turn emails get composites;
     clarify/nudge stay text-only.
+
+    images_cfg["composite"]: 'v1' (three-panel composite) or 'v2'
+    (single scene image + SVG map overlay, build_turn_composite_v2).
+    Defaults to 'v1'; the flip to v2 is Neil's call once he approves
+    the overlay proof (ATFL_COMPOSITE).
     """
     if (not images_cfg) or images_cfg.get("mode") in (None, "off") \
             or outcome.action != "turn_email":
         return None, None
+    composite_mode = (images_cfg.get("composite") or "v1").strip().lower()
+    if composite_mode not in ("v1", "v2"):
+        return None, (f"images skipped (ATFL_COMPOSITE={composite_mode!r} "
+                       "not 'v1'/'v2')")
     try:
-        from .images import build_provider, build_turn_composite, ImageError
+        from .images import (build_provider, build_turn_composite,
+                             build_turn_composite_v2, ImageError)
         provider = build_provider(images_cfg.get("mode"),
                                   api_key=images_cfg.get("api_key"),
                                   hf_token=images_cfg.get("hf_token"))
         if provider is None:
             return None, None
+        if composite_mode == "v2":
+            comp = build_turn_composite_v2(games_dir, outcome.guid,
+                                           outcome.turn_no, provider)
+            return (comp["jpeg"],
+                    f"single image attached ({comp['time_of_day']}, "
+                    f"map overlay {comp['overlay_px']}px)")
         comp = build_turn_composite(games_dir, outcome.guid,
                                     outcome.turn_no, provider)
         return (comp["jpeg"],
@@ -549,6 +565,43 @@ def selftest():
            and nenv["attachments"] == [])
     _check("nudge: second sweep quiet (last_email_at advanced)",
            maybe_nudge(tmp, "murph", "/node/root", relay=relay2) == [])
+
+    # -- _turn_composite: v1/v2 wiring behind ATFL_COMPOSITE (#91) --
+    # Seeded game (discovered trailhead → map has something to draw),
+    # stub provider so no network/key anywhere.
+    from .seed import seed as _seed
+    vguid = "composite-drill-guid"
+    vdb = _schema.create_db(os.path.join(tmp, vguid + ".db"))
+    _seed(vdb, vguid, "player@example.com")
+    vdb.commit()
+    vdb.close()
+    out_t = DispatchOutcome("turn_email", "player@example.com",
+                            subject="[ATFL] x", body="narrative",
+                            guid=vguid, turn_no=1)
+    jpg2, note2 = _turn_composite(tmp, out_t,
+                                  {"mode": "stub", "composite": "v2"})
+    _check("composite: v2 returns JPEG bytes + single-image note",
+           jpg2 is not None and jpg2[:3] == b"\xff\xd8\xff"
+           and note2.startswith("single image attached"))
+    adb = _open_game_db(tmp, vguid)
+    v2_kinds = {r[0] for r in adb.execute(
+        "SELECT kind FROM assets WHERE turn_created=1")}
+    adb.close()
+    _check("composite: v2 provenance rows are the _v2 kinds",
+           {"scene_v2", "map_svg", "composite_v2"} <= v2_kinds
+           and "composite" not in v2_kinds)
+    jpg1, note1 = _turn_composite(tmp, out_t,
+                                  {"mode": "stub", "composite": "v1"})
+    _check("composite: v1 three-panel still ships",
+           jpg1 is not None and jpg1[:3] == b"\xff\xd8\xff"
+           and note1.startswith("composite attached"))
+    jpg_d, note_d = _turn_composite(tmp, out_t, {"mode": "stub"})
+    _check("composite: missing 'composite' key defaults to v1",
+           jpg_d is not None and note_d.startswith("composite attached"))
+    jpg_b, note_b = _turn_composite(tmp, out_t,
+                                    {"mode": "stub", "composite": "v3"})
+    _check("composite: bad mode -> (None, note), never raises",
+           jpg_b is None and "ATFL_COMPOSITE" in note_b)
 
     print("\nmailer relay selftest: all checks green.")
 
