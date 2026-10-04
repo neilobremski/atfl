@@ -12,6 +12,13 @@ only the drawing backend changes (PIL -> SVG -> cairo).
 
 Determinism: seeded randomness only, exactly the same seeds as the PIL
 panel, so the SVG byte-stream is stable for a given game state.
+
+Composite spec (Neil's 2026-10-04 direction, supersedes the 2026-10-03
+half-size verdict): the scene stays 1024x1024; only the map shrinks 50%
+(340 -> 170), fonts scaling down with it. The map is rendered at its FULL
+340 design size and LANCZOS-downscaled to 170 (rasterize_scaled) —
+rendering small directly made the cairosvg text a jumble. This supersedes
+the 2026-10-02 "never rendered big and downscaled" rule.
 """
 from __future__ import annotations
 
@@ -23,17 +30,14 @@ import shutil
 
 from .map_panel import _TOD_PALETTE, _seed, layout_map
 
-# Overlay defaults, decided 2026-10-02 with the proof
-# (hidden_files/scene_map_overlay_proof_20261002.jpg): the map is drawn
-# at its native overlay size — never rendered big and downscaled, or the
-# labels go illegible.
+# Overlay geometry. OVERLAY_PX = the map's full design size. Neil's
+# 2026-10-04 direction: the scene stays 1024; only the map shrinks 50%
+# (340 -> 170). The map is rendered at full size and downscaled with
+# LANCZOS (rasterize_scaled); fonts scale down with the map by
+# construction. This supersedes the 2026-10-02 "never downscale" rule
+# and the 2026-10-03 512px composite.
 OVERLAY_PX = 340
 OVERLAY_MARGIN_PX = 28
-
-# v2 half-size (Neil's verdict 2026-10-03 on the proof: "shrink the image by
-# 50%"): the single-image composite ships at half linear size — 512px scene,
-# 170px map overlay, 14px margin. The overlay scales with the scene so the
-# composition stays byte-faithful to the approved 1024px proof.
 OVERLAY_V2_PX = 170
 OVERLAY_V2_MARGIN_PX = 14
 
@@ -94,17 +98,41 @@ def _esc(s):
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def render_map_svg(places, edges, player_slug, time_of_day="morning", size=1024):
+# Map presentation labels (Neil's 2026-10-04 direction: the map's labels
+# are short — "YOU" + interesting points only. The map orients the player;
+# it does not describe. The seed's sentence-length names stay the places'
+# prose identity; this table is the map's label layer, not a rename.)
+SHORT_LABELS = {
+    "trailhead": "Trailhead",
+    "trail-down": "Descent",
+    "trail-up": "Switchbacks",
+    "fog-below": "Fog",
+}
+
+
+def render_map_svg(places, edges, player_slug, time_of_day="morning",
+                   size=1024, labels=None, style="sketch"):
     """Map as an SVG string. Same inputs/contract as map_panel.render_map.
 
     Only discovered places are ever drawn (the caller passes the filtered
-    set). Labels get opaque parchment plates — cairosvg ignores
-    paint-order on text, so a stroke halo would not survive rasterization.
+    set). labels maps slug -> short label; when None, SHORT_LABELS is used
+    (falling back to the full name for unknown slugs). style is "sketch"
+    (hand-drawn double frame, parchment label plates), "minimal" (single
+    frame, filled node dots, small plates) or "plain" (no frame, thin
+    lines, bare labels beside nodes).
+
+    Labels get opaque parchment plates in the sketch/minimal styles —
+    cairosvg ignores paint-order on text, so a stroke halo would not
+    survive rasterization.
     """
+    if style not in ("sketch", "minimal", "plain"):
+        raise ValueError(f"unknown map style: {style!r}")
     if player_slug not in places:
         raise ValueError(f"player place {player_slug!r} not in places")
     base, accent, ink = _TOD_PALETTE.get(time_of_day, _TOD_PALETTE["morning"])
     positions = layout_map(places, edges, size)
+    lab = (labels if labels is not None
+           else {s: SHORT_LABELS.get(s, n) for s, n in places.items()})
 
     s = []
     A = s.append
@@ -113,56 +141,79 @@ def render_map_svg(places, edges, player_slug, time_of_day="morning", size=1024)
     A(f'<rect x="0" y="0" width="{size}" height="{size}" rx="{size * 0.05:.0f}" '
       f'fill="{_rgb(base)}"/>')
 
-    # double hand-drawn frame
-    m = size * 0.03
-    for d in _sketch_path((m, m), (size - m, m), "frame:n", size, jitter=size * 0.009):
-        A(f'<path d="{d}" stroke="{_rgb(ink)}" stroke-width="4" fill="none" '
-          f'stroke-linecap="round"/>')
-    for d in _sketch_path((size - m, m), (size - m, size - m), "frame:e", size, jitter=size * 0.009):
-        A(f'<path d="{d}" stroke="{_rgb(ink)}" stroke-width="4" fill="none" '
-          f'stroke-linecap="round"/>')
-    for d in _sketch_path((size - m, size - m), (m, size - m), "frame:s", size, jitter=size * 0.009):
-        A(f'<path d="{d}" stroke="{_rgb(ink)}" stroke-width="4" fill="none" '
-          f'stroke-linecap="round"/>')
-    for d in _sketch_path((m, size - m), (m, m), "frame:w", size, jitter=size * 0.009):
-        A(f'<path d="{d}" stroke="{_rgb(ink)}" stroke-width="4" fill="none" '
-          f'stroke-linecap="round"/>')
-    m2 = size * 0.045
-    for (p0, p1, sd) in (((m2, m2), (size - m2, m2), "frame2:n"),
-                         ((size - m2, m2), (size - m2, size - m2), "frame2:e"),
-                         ((size - m2, size - m2), (m2, size - m2), "frame2:s"),
-                         ((m2, size - m2), (m2, m2), "frame2:w")):
-        for d in _sketch_path(p0, p1, sd, size, jitter=size * 0.009):
-            A(f'<path d="{d}" stroke="{_rgb(accent)}" stroke-width="2" fill="none" '
-              f'stroke-linecap="round"/>')
+    jw = size * 0.009
+    if style in ("sketch", "minimal"):
+        # hand-drawn frame (double for sketch, single for minimal)
+        fw = 4 if style == "sketch" else 3
+        m = size * 0.03
+        for (p0, p1, sd) in (((m, m), (size - m, m), "frame:n"),
+                             ((size - m, m), (size - m, size - m), "frame:e"),
+                             ((size - m, size - m), (m, size - m), "frame:s"),
+                             ((m, size - m), (m, m), "frame:w")):
+            for d in _sketch_path(p0, p1, sd, size, jitter=jw):
+                A(f'<path d="{d}" stroke="{_rgb(ink)}" stroke-width="{fw}" '
+                  f'fill="none" stroke-linecap="round"/>')
+        if style == "sketch":
+            m2 = size * 0.045
+            for (p0, p1, sd) in (((m2, m2), (size - m2, m2), "frame2:n"),
+                                 ((size - m2, m2), (size - m2, size - m2), "frame2:e"),
+                                 ((size - m2, size - m2), (m2, size - m2), "frame2:s"),
+                                 ((m2, size - m2), (m2, m2), "frame2:w")):
+                for d in _sketch_path(p0, p1, sd, size, jitter=jw):
+                    A(f'<path d="{d}" stroke="{_rgb(accent)}" stroke-width="2" '
+                      f'fill="none" stroke-linecap="round"/>')
+    # plain: no frame at all
 
     # edges under nodes
     for a, b in edges:
         key = f"edge:{min(a, b)}:{max(a, b)}"
-        for d in _sketch_path(positions[a], positions[b], key, size, jitter=size * 0.009):
-            A(f'<path d="{d}" stroke="{_rgb(ink)}" stroke-width="3" fill="none" '
-              f'stroke-linecap="round"/>')
+        if style == "plain":
+            x0, y0 = positions[a]
+            x1, y1 = positions[b]
+            A(f'<line x1="{x0:.1f}" y1="{y0:.1f}" x2="{x1:.1f}" y2="{y1:.1f}" '
+              f'stroke="{_rgb(ink)}" stroke-width="2"/>')
+        else:
+            passes = 2 if style == "sketch" else 1
+            ew = 3 if style == "sketch" else 2
+            for d in _sketch_path(positions[a], positions[b], key, size,
+                                  passes=passes, jitter=jw):
+                A(f'<path d="{d}" stroke="{_rgb(ink)}" stroke-width="{ew}" '
+                  f'fill="none" stroke-linecap="round"/>')
 
-    # nodes + labels (parchment plates behind wrapped labels)
+    # nodes + labels (short labels; parchment plates in sketch/minimal,
+    # bare labels beside nodes in plain)
     node_r = size * 0.035
+    dr = node_r if style == "sketch" else node_r * (0.5 if style == "minimal" else 0.32)
     label_px = max(20, size // 34)
     for slug, name in places.items():
         x, y = positions[slug]
-        d = _sketch_circle_path((x, y), node_r, f"node:{slug}")
-        A(f'<path d="{d}" stroke="{_rgb(ink)}" stroke-width="3" fill="none" '
-          f'stroke-linecap="round"/>')
-        lines = _wrap(name, width=max(10, size // 22))
-        est_w = max(len(ln) for ln in lines) * label_px * 0.60
-        est_h = len(lines) * label_px * 1.18
-        plate_y = y + node_r + 6
-        A(f'<rect x="{x - est_w / 2 - 6:.1f}" y="{plate_y - label_px * 0.55:.1f}" '
-          f'width="{est_w + 12:.1f}" height="{est_h + 4:.1f}" rx="6" '
-          f'fill="{_rgb(base)}" fill-opacity="0.94"/>')
-        for i, ln in enumerate(lines):
-            ly = plate_y + label_px * 0.35 + i * label_px * 1.15
-            A(f'<text x="{x:.1f}" y="{ly:.1f}" '
-              f'text-anchor="middle" font-family="\'DejaVu Serif\',serif" '
-              f'font-size="{label_px}" fill="{_rgb(ink)}">{_esc(ln)}</text>')
+        text = lab[slug]
+        if style == "sketch":
+            d = _sketch_circle_path((x, y), node_r, f"node:{slug}")
+            A(f'<path d="{d}" stroke="{_rgb(ink)}" stroke-width="3" fill="none" '
+              f'stroke-linecap="round"/>')
+        else:
+            A(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{dr:.1f}" '
+              f'fill="{_rgb(ink)}"/>')
+        if style == "plain":
+            ly = y + label_px * 0.35
+            A(f'<text x="{x + dr + 8:.1f}" y="{ly:.1f}" '
+              f'text-anchor="start" font-family="\'DejaVu Serif\',serif" '
+              f'font-size="{label_px}" fill="{_rgb(ink)}">{_esc(text)}</text>')
+        else:
+            lines = _wrap(text, width=max(10, size // 22))
+            pad = 6 if style == "sketch" else 4
+            est_w = max(len(ln) for ln in lines) * label_px * 0.60
+            est_h = len(lines) * label_px * 1.18
+            plate_y = y + dr + 6
+            A(f'<rect x="{x - est_w / 2 - pad:.1f}" y="{plate_y - label_px * 0.55:.1f}" '
+              f'width="{est_w + pad * 2:.1f}" height="{est_h + 4:.1f}" rx="6" '
+              f'fill="{_rgb(base)}" fill-opacity="0.94"/>')
+            for i, ln in enumerate(lines):
+                ly = plate_y + label_px * 0.35 + i * label_px * 1.15
+                A(f'<text x="{x:.1f}" y="{ly:.1f}" '
+                  f'text-anchor="middle" font-family="\'DejaVu Serif\',serif" '
+                  f'font-size="{label_px}" fill="{_rgb(ink)}">{_esc(ln)}</text>')
 
     # player pin: filled red dot + YOU
     px, py = positions[player_slug]
@@ -170,7 +221,7 @@ def render_map_svg(places, edges, player_slug, time_of_day="morning", size=1024)
     pin_px = max(16, size // 46)
     A(f'<circle cx="{px:.1f}" cy="{py:.1f}" r="{pin_r:.1f}" fill="#b22222" '
       f'stroke="#5a1010" stroke-width="2"/>')
-    A(f'<text x="{px:.1f}" y="{py - node_r - 6:.1f}" text-anchor="middle" '
+    A(f'<text x="{px:.1f}" y="{py - dr - 6:.1f}" text-anchor="middle" '
       f'font-family="\'DejaVu Serif\',serif" font-size="{pin_px}" '
       f'font-weight="bold" fill="#b22222">YOU</text>')
 
@@ -194,6 +245,23 @@ def rasterize(svg_text, px):
         raise ImageError(f"cairosvg is not installed: {e}") from e
     return cairosvg.svg2png(bytestring=svg_text.encode("utf-8"),
                             output_width=px, output_height=px)
+
+
+def rasterize_scaled(svg_text, render_px, out_px):
+    """Render the SVG at its full design size, then LANCZOS-downscale to
+    the shipped overlay size. Neil's 2026-10-04 direction: the downscale
+    is what keeps the cairosvg text crisp — rendering at the small size
+    directly makes the text a jumble (supersedes the 2026-10-02
+    never-downscale rule)."""
+    from PIL import Image
+    png = rasterize(svg_text, render_px)
+    img = Image.open(io.BytesIO(png))
+    if img.size == (out_px, out_px):
+        return png
+    img = img.resize((out_px, out_px), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
 
 
 def composite_scene_map(scene_jpeg_or_png, map_png, overlay_px=OVERLAY_PX,
@@ -277,18 +345,18 @@ def selftest():
 
     HIDDEN = os.path.expanduser(
         "~/workspace/goals/above-the-fog-line-game-project/hidden_files")
-    # Half-size proof (Neil's 2026-10-03 verdict): the shipped look is the
-    # 512px composite; the SVG renderer parity below stays at 340px (its
-    # native design size), the JPEG parity re-bases to the half-size files.
-    PROOF_SVG = os.path.join(HIDDEN, "scene_map_overlay_proof_20261002.svg")
-    PROOF_JPG = os.path.join(HIDDEN, "composite_v2_halfsize_proof_20261003.jpg")
-    SCENE_SRC = os.path.join(HIDDEN, "composite_v2_halfsize_scene_20261003.png")
+    # Full-size spec (Neil's 2026-10-04 direction, supersedes the 2026-10-03
+    # half-size verdict): 1024 scene, map rendered at its 340 design size
+    # and downscaled to 170. Written by hidden_files/gen_map_proofs_20261004.py.
+    PROOF_SVG = os.path.join(HIDDEN, "map_svg_proof_20261004.svg")
+    PROOF_JPG = os.path.join(HIDDEN, "composite_proof_20261004.jpg")
+    SCENE_SRC = os.path.join(HIDDEN, "composite_proof_scene_20261004.png")
 
     games_dir = tempfile.mkdtemp(prefix="atfl-mapsvg-")
     guid = "mapsvg-selftest"
     view, tod, player_loc, discovered, edges = _proof_state(games_dir, guid)
 
-    # -- svg renderer parity with the prototype's proof --
+    # -- svg renderer parity with the shipped proof --
     svg1 = render_map_svg(discovered, edges, player_loc, tod, size=OVERLAY_PX)
     svg2 = render_map_svg(discovered, edges, player_loc, tod, size=OVERLAY_PX)
     _check("svg deterministic (same bytes twice)", svg1 == svg2)
@@ -298,31 +366,66 @@ def selftest():
            svg1 == proof_svg,
            f"server {len(svg1)}B vs proof {len(proof_svg)}B")
 
+    # -- style matrix: all three styles render, differ, and are deterministic --
+    styled = {}
+    for st in ("sketch", "minimal", "plain"):
+        a = render_map_svg(discovered, edges, player_loc, tod,
+                           size=OVERLAY_PX, style=st)
+        b = render_map_svg(discovered, edges, player_loc, tod,
+                           size=OVERLAY_PX, style=st)
+        _check(f"style {st} deterministic", a == b)
+        _check(f"style {st} parses as xml", ET.fromstring(a) is not None)
+        styled[st] = a
+    _check("the three styles differ pairwise",
+           len(set(styled.values())) == 3)
+    _check("plain uses straight lines, sketch does not",
+           "<line" in styled["plain"] and "<line" not in styled["sketch"])
+    try:
+        render_map_svg(discovered, edges, player_loc, tod, style="nope")
+        _check("unknown style raises", False)
+    except ValueError:
+        _check("unknown style raises", True)
+
     # -- secrecy: the svg names nothing outside the filtered state --
     root = ET.fromstring(svg1)
     texts = [(t.text or "") for t in root.iter() if t.tag.endswith("text")]
     allowed = set()
-    for name in discovered.values():
-        allowed.update(_wrap(name, width=max(10, OVERLAY_PX // 22)))
+    for slug, name in discovered.items():
+        allowed.update(_wrap(SHORT_LABELS.get(slug, name),
+                             width=max(10, OVERLAY_PX // 22)))
     allowed |= {"YOU", tod.upper()}
     unknowns = [t for t in texts if t not in allowed]
     _check("svg names nothing outside filtered state", not unknowns,
            str(unknowns[:3]))
+    # -- and the long seed names must NOT appear on the map --
+    long_names = [n for s, n in discovered.items()
+                  if SHORT_LABELS.get(s, n) != n]
+    _check("long seed names are not used as map labels",
+           not any(n in svg1 for n in long_names),
+           str(long_names[:2]))
 
-    # -- rasterize + composite geometry --
-    map_png = rasterize(svg1, OVERLAY_PX)
+    # -- rasterize_scaled: full-size render -> downscaled overlay --
+    map_png = rasterize_scaled(svg1, OVERLAY_PX, OVERLAY_V2_PX)
     img = Image.open(io.BytesIO(map_png))
-    _check("map raster is overlay size", img.size == (OVERLAY_PX, OVERLAY_PX))
+    _check("downscaled map is 170x170", img.size == (OVERLAY_V2_PX, OVERLAY_V2_PX),
+           str(img.size))
+    full_png = rasterize(svg1, OVERLAY_PX)
+    _check("full-size raster is 340x340",
+           Image.open(io.BytesIO(full_png)).size == (OVERLAY_PX, OVERLAY_PX))
 
+    # -- composite geometry: 1024 scene, 170 overlay, 14 margin --
     scene = Image.new("RGB", (1024, 1024), (120, 140, 120))
     sbuf = io.BytesIO()
     scene.save(sbuf, "PNG")
-    jpeg, box = composite_scene_map(sbuf.getvalue(), map_png)
+    jpeg, box = composite_scene_map(sbuf.getvalue(), map_png,
+                                    OVERLAY_V2_PX, OVERLAY_V2_MARGIN_PX)
     out = Image.open(io.BytesIO(jpeg))
-    _check("composite jpeg is scene size", out.size == (1024, 1024), str(out.size))
+    _check("composite jpeg is 1024x1024 (Neil 2026-10-04)",
+           out.size == (1024, 1024), str(out.size))
     _check("overlay box bottom-left at margin",
-           box == (OVERLAY_MARGIN_PX, 1024 - OVERLAY_MARGIN_PX - OVERLAY_PX,
-                   OVERLAY_MARGIN_PX + OVERLAY_PX, 1024 - OVERLAY_MARGIN_PX),
+           box == (OVERLAY_V2_MARGIN_PX, 1024 - OVERLAY_V2_MARGIN_PX - OVERLAY_V2_PX,
+                   OVERLAY_V2_MARGIN_PX + OVERLAY_V2_PX,
+                   1024 - OVERLAY_V2_MARGIN_PX),
            str(box))
 
     # -- full v2 builder end to end with a stub provider --
@@ -331,15 +434,18 @@ def selftest():
     class Stub:
         def generate_scene(self, prompt, *, size=1024):
             _check("scene prompt mentions morning", "morning" in prompt.lower())
+            _check("scene generated at 1024", size == 1024)
             scene = Image.new("RGB", (size, size), (120, 140, 120))
             b = io.BytesIO()
             scene.save(b, "PNG")
             return b.getvalue()
 
     res = build_turn_composite_v2(games_dir, guid, 1, Stub())
-    # Half-size since Neil's 2026-10-03 verdict ("shrink the image by 50%").
-    _check("v2 jpeg is 512x512 (half-size, Neil 2026-10-03)",
-           Image.open(io.BytesIO(res["jpeg"])).size == (512, 512))
+    # Full size since Neil's 2026-10-04 verdict (scene stays 1024).
+    _check("v2 jpeg is 1024x1024 (full size, Neil 2026-10-04)",
+           Image.open(io.BytesIO(res["jpeg"])).size == (1024, 1024))
+    _check("v2 overlay_px is 170", res["overlay_px"] == OVERLAY_V2_PX,
+           str(res["overlay_px"]))
     _check("v2 returns the builder contract keys",
            set(res) >= {"jpeg", "scene_prompt", "time_of_day", "overlay_px",
                         "overlay_box", "prompt_hash", "sent_at"})

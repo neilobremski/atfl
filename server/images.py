@@ -678,10 +678,11 @@ def build_turn_composite(games_dir, guid, turn_no, provider,
 # corner, whole thing compressed to a JPEG. Selfie cut until scene+map
 # look right.
 #
-# v2 half-size (Neil's verdict 2026-10-03 on the proof): the single-image
-# composite ships at 512px, half the 1024px proof, with the overlay scaled
-# down in proportion.
-COMPOSITE_V2_SIZE = 512
+# v2 full-size (Neil's verdict 2026-10-04 on the composite, superseding
+# 2026-10-03's half-size): the scene stays 1024x1024; only the map
+# overlay shrinks 50% (340 -> 170), rendered at full size and downscaled
+# (map_svg.rasterize_scaled) so the cairosvg text stays crisp.
+COMPOSITE_V2_SIZE = 1024
 
 # WIRED 2026-10-03 (session #91): mailer._turn_composite calls this builder
 # when images_cfg["composite"] == "v2" (ATFL_COMPOSITE=v2 in config,
@@ -698,7 +699,7 @@ from .map_svg import (  # noqa: E402
     OVERLAY_V2_PX,
     ImageError as MapSvgError,
     composite_scene_map,
-    rasterize as rasterize_map_svg,
+    rasterize_scaled,
     render_map_svg,
 )
 
@@ -710,13 +711,16 @@ def build_turn_composite_v2(games_dir, guid, turn_no, provider,
                             margin: int = OVERLAY_V2_MARGIN_PX) -> dict:
     """Generate the turn's single image: scene + SVG map overlay.
 
-    Size (2026-10-03, Neil's verdict on the proof): 512px square, half
-    the 1024px proof, with the map overlay scaled to 170px in proportion.
+    Size (2026-10-04, Neil's verdict, superseding 2026-10-03's half-size):
+    1024px square scene; the map overlay is rendered at its 340px design
+    size and LANCZOS-downscaled to 170px (rasterize_scaled) with a
+    14px margin.
 
     Steps: prompt from filtered state (+ game-clock time of day) ->
-    scene from the provider -> map as SVG (native overlay size, from DB
-    truth) -> rasterize -> bottom-left composite with drop shadow ->
-    JPEG -> persist bytes + provenance rows.
+    scene from the provider -> map as SVG at full design size (from DB
+    truth, short labels) -> rasterize at 340 -> downscale to 170 ->
+    bottom-left composite with drop shadow -> JPEG -> persist bytes +
+    provenance rows.
 
     Returns {"jpeg": bytes, "scene_prompt": str, "time_of_day": str,
              "overlay_px": int, "overlay_box": tuple, "prompt_hash": str}.
@@ -747,8 +751,8 @@ def build_turn_composite_v2(games_dir, guid, turn_no, provider,
                  if a in discovered and b in discovered]
 
         svg_text = render_map_svg(discovered, edges, player_loc, tod,
-                                  size=overlay_px)
-        map_png = rasterize_map_svg(svg_text, overlay_px)
+                                  size=OVERLAY_PX)
+        map_png = rasterize_scaled(svg_text, OVERLAY_PX, overlay_px)
         scene_jpg = provider.generate_scene(s_prompt, size=size)
     except (ImageError, MapSvgError):
         raise

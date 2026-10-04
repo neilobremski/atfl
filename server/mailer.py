@@ -190,8 +190,9 @@ def _turn_composite(games_dir, outcome, images_cfg):
 
     images_cfg["composite"]: 'v1' (three-panel composite) or 'v2'
     (single scene image + SVG map overlay, build_turn_composite_v2).
-    Defaults to 'v1'. Neil approved v2 on 2026-10-03 (single image,
-    half size) — the flip rides on ATFL_COMPOSITE in the env.
+    Defaults to 'v1'. Neil approved v2 on 2026-10-03 (single image) with
+    the 2026-10-04 geometry (1024 scene, 170px overlay) — the flip rides
+    on ATFL_COMPOSITE in the env.
     """
     if (not images_cfg) or images_cfg.get("mode") in (None, "off") \
             or outcome.action != "turn_email":
@@ -585,8 +586,8 @@ def selftest():
            and note2.startswith("single image attached"))
     import io as _io
     from PIL import Image as _Img
-    _check("composite: v2 half-size 512x512, overlay 170px (Neil 2026-10-03)",
-           _Img.open(_io.BytesIO(jpg2)).size == (512, 512)
+    _check("composite: v2 full-size 1024x1024, overlay 170px (Neil 2026-10-04)",
+           _Img.open(_io.BytesIO(jpg2)).size == (1024, 1024)
            and "170px" in note2)
     adb = _open_game_db(tmp, vguid)
     v2_kinds = {r[0] for r in adb.execute(
