@@ -3,9 +3,17 @@
 First-time flip of `ATFL_GM=mock` → `roster` on the game VM, with rollback.
 Prerequisites: this file assumes the `fogline-gm` R4T roster has been created
 (the roster now exists at `~/ar3/fogline-gm/r4t.md`, registered 2026-09-28 —
-see note below), and a test Gmail identity is available
-(standing OQ#1/#4 — the dry run sends real turn emails, so it needs a real
-account; use a scratch game that sends only to Neil/the operator's own address).
+see note below), and a real inbound identity is available for the dry run
+(post-relay: the dry run sends real turn emails through the Murph relay, so
+it needs the operator's own address — use a scratch game that sends only to
+the operator's own address).
+
+**2026-10-03 (session #96):** the flip was done and verified clean — see the
+"Flip record" section below. The preconditions were updated for the relay era:
+the Gmail identity line is retired (the drill uses the operator's own
+Inkbox mailbox), and the roster daemon location is clarified (it runs on the
+operator VM via `a8s-fogline-gm.service`, reachable from free-micro-1 through
+the shared S3 mailbox — the roster does NOT run on free-micro-1).
 
 **2026-09-28 (session #32):** the `fogline-gm` roster exists and answers on
 the opencode free path (keeper/arbiter/critic, one turn at a time, rig
@@ -18,16 +26,17 @@ opencode works with no login on the free path (verified 2026-09-28).
 
 ## 0. Preconditions (before touching the VM)
 
-- [ ] The `fogline-gm` **a8s node is running** (`a8s start fogline-gm`) on
-      the operator machine — tells are async a8s messages and are only
-      processed while the node runs (verified 2026-09-28: a tell sent while
-      the node was down sat in the S3 mailbox unprocessed). The same
-      applies on free-micro-1: the roster node must be started (and
-      restarted on boot) alongside the game server. The opencode rig must
-      exist under the `atfl` user with `opencode` on the r4t worker PATH
-      (Memory, 2026-09-28: Tailscale plan gives SSH once Neil runs the
-      one-time Mac-side install; without it there is no terminal path to
-      the VM).
+- [ ] The `fogline-gm` **a8s node daemon is running and reachable** — tells
+      are async a8s messages processed by the daemon that owns the
+      `fogline-gm` mailbox, and a tell sent while no daemon serves that
+      mailbox sits in the S3 mailbox unprocessed (verified 2026-09-28).
+      Current topology (2026-10-03): the daemon is
+      `a8s-fogline-gm.service` on the operator VM, started on boot and
+      reinstalled by the step-0 helper after host events; free-micro-1
+      reaches it through the shared S3 mailbox — no roster process runs
+      on free-micro-1, and no opencode/r4t install is needed under the
+      `atfl` user there. (The 2026-09-28 plan to start the roster node on
+      free-micro-1 is superseded.)
 - [ ] **Start-send-stop is code-enforced** (session #40; was operator
       procedure before): `RosterGM._send_real` starts the `atfl-server`
       node, sends the tell from `node_root`, then stops the node in a
@@ -124,6 +133,36 @@ once and then record a clean failed outcome with nothing sent:
 - [ ] 3 consecutive scratch turns complete with no failed outcomes.
 - [ ] Every mutation the roster proposed landed in the ledger with its cause.
 - [ ] The k7e-vs-SQLite rule held on any conflict: DB won (ledger shows why).
+
+## Flip record (2026-10-03, session #96)
+
+- Flipped `ATFL_GM=mock` → `roster` in `/etc/atfl/atfl.env` on free-micro-1
+  (`sudo sed`, key verified `ATFL_GM=roster`), `sudo systemctl restart atfl`.
+  No deployed-code change was needed: the VM checkout is at fe6b24b and
+  `server/{gm,poll,config,turn_loop}.py` are md5-identical to local main.
+- Verified clean: two consecutive 5-min poll cycles post-restart, each
+  "0 inbound processed, 0 handed off, 0 nudged"; config refused nothing and
+  RosterGM constructed fine (env keys ATFL_A8S_NODE=atfl-server,
+  ATFL_A8S_NODE_ROOT=/srv/atfl/a8s/atfl-server, ATFL_A8S_AGENTS_DIR set;
+  `a8s` resolves to `/srv/atfl/.ar3/a8s` via the ~/.ar3 fallback).
+- The flip is currently INERT: `/var/lib/atfl/games/` holds mailer.db only
+  (no game DBs), so no roster calls fire and no tells leave free-micro-1.
+  The server is now playtest-ready per DESIGN.md §6.1 (a real GM behind the
+  pipeline); the mock drills (#87–#93) all ran pre-flip.
+- Still UNPROVEN: the cross-host roster leg — `a8s tell` from free-micro-1's
+  transient atfl-server node to the fogline-gm mailbox, and the reply read
+  back — has never fired in production. RosterGM was dry-run green from the
+  operator VM (dryrun9, game ae90322a, PASS), and the reply mechanics
+  (send-and-return, in-flight re-attach, REPLY_WAIT_S=7200 with one reprompt)
+  are built for multi-hour legs, but the first production turn is still a
+  live test. DELIBERATE: no synthetic roster turn was started in #96 — a
+  real roster turn spans hours of keeper work (legs landed 34–69 min after
+  send in the dry runs), and injecting a synthetic game while keeper's
+  verification experiments are active risks interference. When Neil sends
+  "write start", his real game IS the drill; until then the flipped-idle
+  state is the correct resting state.
+- Rollback is the §5 one-liner; nothing else changes between backends
+  (state lives in SQLite, not the model).
 
 ## 5. Rollback
 
