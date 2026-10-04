@@ -678,15 +678,24 @@ def build_turn_composite(games_dir, guid, turn_no, provider,
 # corner, whole thing compressed to a JPEG. Selfie cut until scene+map
 # look right.
 #
+# v2 half-size (Neil's verdict 2026-10-03 on the proof): the single-image
+# composite ships at 512px, half the 1024px proof, with the overlay scaled
+# down in proportion.
+COMPOSITE_V2_SIZE = 512
+
 # WIRED 2026-10-03 (session #91): mailer._turn_composite calls this builder
 # when images_cfg["composite"] == "v2" (ATFL_COMPOSITE=v2 in config,
-# default 'v1'). The FLIP itself is Neil's call — he approves the overlay
-# proof (goal hidden_files/scene_map_overlay_proof_20261002.jpg); until
-# then v2 stays off and v1 ships. Asset kinds carry a "_v2" suffix so
-# draft runs never collide with v1 archive files.
+# default 'v1'). Neil approved the single-image look on 2026-10-03
+# ("way better with the map embedded in the image, only a single image")
+# with one change: shrink it by 50% — hence the V2-size defaults above.
+# The FLIP on free-micro-1 went with the same verdict.
+# Asset kinds carry a "_v2" suffix so draft runs never collide with v1
+# archive files.
 from .map_svg import (  # noqa: E402
     OVERLAY_MARGIN_PX,
     OVERLAY_PX,
+    OVERLAY_V2_MARGIN_PX,
+    OVERLAY_V2_PX,
     ImageError as MapSvgError,
     composite_scene_map,
     rasterize as rasterize_map_svg,
@@ -695,11 +704,14 @@ from .map_svg import (  # noqa: E402
 
 
 def build_turn_composite_v2(games_dir, guid, turn_no, provider,
-                            size: int = COMPOSITE_PANEL_SIZE,
+                            size: int = COMPOSITE_V2_SIZE,
                             quality: int = COMPOSITE_JPEG_QUALITY,
-                            overlay_px: int = OVERLAY_PX,
-                            margin: int = OVERLAY_MARGIN_PX) -> dict:
+                            overlay_px: int = OVERLAY_V2_PX,
+                            margin: int = OVERLAY_V2_MARGIN_PX) -> dict:
     """Generate the turn's single image: scene + SVG map overlay.
+
+    Size (2026-10-03, Neil's verdict on the proof): 512px square, half
+    the 1024px proof, with the map overlay scaled to 170px in proportion.
 
     Steps: prompt from filtered state (+ game-clock time of day) ->
     scene from the provider -> map as SVG (native overlay size, from DB

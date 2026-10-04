@@ -30,6 +30,13 @@ from .map_panel import _TOD_PALETTE, _seed, layout_map
 OVERLAY_PX = 340
 OVERLAY_MARGIN_PX = 28
 
+# v2 half-size (Neil's verdict 2026-10-03 on the proof: "shrink the image by
+# 50%"): the single-image composite ships at half linear size — 512px scene,
+# 170px map overlay, 14px margin. The overlay scales with the scene so the
+# composition stays byte-faithful to the approved 1024px proof.
+OVERLAY_V2_PX = 170
+OVERLAY_V2_MARGIN_PX = 14
+
 
 def _sketch_path(p0, p1, seed_text, size, passes=2, jitter=9):
     """Midpoint-displaced polyline, 2 passes — mirrors map_panel's
@@ -270,9 +277,12 @@ def selftest():
 
     HIDDEN = os.path.expanduser(
         "~/workspace/goals/above-the-fog-line-game-project/hidden_files")
+    # Half-size proof (Neil's 2026-10-03 verdict): the shipped look is the
+    # 512px composite; the SVG renderer parity below stays at 340px (its
+    # native design size), the JPEG parity re-bases to the half-size files.
     PROOF_SVG = os.path.join(HIDDEN, "scene_map_overlay_proof_20261002.svg")
-    PROOF_JPG = os.path.join(HIDDEN, "scene_map_overlay_proof_20261002.jpg")
-    SCENE_SRC = os.path.join(HIDDEN, "hf_e2e_scene.png")  # real 1024 test scene
+    PROOF_JPG = os.path.join(HIDDEN, "composite_v2_halfsize_proof_20261003.jpg")
+    SCENE_SRC = os.path.join(HIDDEN, "composite_v2_halfsize_scene_20261003.png")
 
     games_dir = tempfile.mkdtemp(prefix="atfl-mapsvg-")
     guid = "mapsvg-selftest"
@@ -327,8 +337,9 @@ def selftest():
             return b.getvalue()
 
     res = build_turn_composite_v2(games_dir, guid, 1, Stub())
-    _check("v2 jpeg is 1024x1024",
-           Image.open(io.BytesIO(res["jpeg"])).size == (1024, 1024))
+    # Half-size since Neil's 2026-10-03 verdict ("shrink the image by 50%").
+    _check("v2 jpeg is 512x512 (half-size, Neil 2026-10-03)",
+           Image.open(io.BytesIO(res["jpeg"])).size == (512, 512))
     _check("v2 returns the builder contract keys",
            set(res) >= {"jpeg", "scene_prompt", "time_of_day", "overlay_px",
                         "overlay_box", "prompt_hash", "sent_at"})
