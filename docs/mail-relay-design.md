@@ -172,6 +172,17 @@ never polls a mailbox. Decisions (2026-09-30):
    per-run line in `atfl_outbound_consumer.log`; no cron daemon exists on
    the sandbox VM, so the runner is designed to be called from the
    message-poller's step loop — wiring that hook is a main-agent ask).
+   DONE 2026-10-03 (#95): scheduling solved WITHOUT cron — systemd pair
+   `atfl-outbound-relay.service` + `atfl-outbound-relay.timer` (persistent
+   copies in ~/workspace/a8s-systemd/, installed by step-0
+   reinstall-a8s-units.sh so host events re-provision it). Oneshot service
+   runs the runner as root (log/lock/consumer are root-owned from the drill
+   drains), EnvironmentFile=/etc/environment for the proxy vars (the #307
+   lesson). Timer: OnCalendar=*:0/10, Persistent=true — an outbound email
+   waits at most ~10 min between handoff and delivery. flock(1) guard inside
+   the runner keeps overlapping runs off. First systemd-fired drain:
+   2026-10-04T04:10:28Z rc=0 scanned=194 ignored=194 sent=0 (clean no-op).
+   The main-agent cron/poller-hook ask is now MOOT — withdrawn.
    BUG FOUND BY THE DRILL: the sender POSTed to `/api/v1/messages/send`
    (HTTP 404) — the consumer's 24/24 selftest had enshrined that wrong
    endpoint. Fixed to the proven mailbox endpoint
