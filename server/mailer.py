@@ -567,6 +567,32 @@ def selftest():
     _check("nudge: second sweep quiet (last_email_at advanced)",
            maybe_nudge(tmp, "murph", "/node/root", relay=relay2) == [])
 
+    # -- maybe_nudge: NULL last_email_at = failed signup (dispatch "failed"
+    # rolls back without a handoff, so last_email_at stays NULL and the
+    # sweep nudges the very next cycle, NOT 24h later). Pins the real
+    # first-game failure UX: the player is kept warm immediately, then
+    # the gate closes again for 24h.
+    import uuid as _uuid
+    from . import seed as _seed
+    fail_guid = str(_uuid.uuid4())
+    fdb = _schema.create_db(os.path.join(tmp, fail_guid + ".db"))
+    _seed.seed(fdb, fail_guid, "failed-signup@example.com")
+    fdb.close()
+    n1 = len(relay2.outbox)
+    nudged2 = maybe_nudge(tmp, "murph", "/node/root", relay=relay2)
+    fdb2 = _open_game_db(tmp, fail_guid)
+    try:
+        lea = fdb2.execute("SELECT last_email_at FROM games WHERE guid=?",
+                           (fail_guid,)).fetchone()["last_email_at"]
+    finally:
+        fdb2.close()
+    _check("nudge: failed-signup game (NULL last_email_at) nudged now, "
+           "not after 24h",
+           len(nudged2) == 1 and nudged2[0]["guid"] == fail_guid
+           and len(relay2.outbox) == n1 + 1 and lea is not None)
+    _check("nudge: second sweep quiet after the immediate nudge",
+           maybe_nudge(tmp, "murph", "/node/root", relay=relay2) == [])
+
     # -- _turn_composite: v1/v2 wiring behind ATFL_COMPOSITE (#91) --
     # Seeded game (discovered trailhead → map has something to draw),
     # stub provider so no network/key anywhere.

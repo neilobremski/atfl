@@ -20,7 +20,7 @@ if the roster leg raises, and what state is left behind?
 
 | Exception | Where caught | Result |
 |---|---|---|
-| `TurnFailed` (semantic GM failure: no adjudication, secrecy denylist hit, dead game) | `_turn_outcome` (`dispatch.py`) — §2.6 single in-process retry; second failure → `db.rollback()` → `DispatchOutcome("failed")` | Nothing sent (§5.3: `send_outcome` no-ops on `"failed"`); batch CONTINUES; message marked seen/consumed. The double-fail is visible in the service journal (`action=failed`) and `turn_stats.success=0`. The nudge sweep is the safety net — 24h of silence nudges the player. |
+| `TurnFailed` (semantic GM failure: no adjudication, secrecy denylist hit, dead game) | `_turn_outcome` (`dispatch.py`) — §2.6 single in-process retry; second failure → `db.rollback()` → `DispatchOutcome("failed")` | Nothing sent (§5.3: `send_outcome` no-ops on `"failed"`); batch CONTINUES; message marked seen/consumed. The double-fail is visible in the service journal (`action=failed`) and `turn_stats.success=0`. The nudge sweep is the safety net — but the timing is NOT 24h: a failed signup leaves `last_email_at` NULL (no handoff ever happened), and `maybe_nudge` runs at the end of the same poll cycle, so the player gets ONE nudge within minutes, not after a day of silence. The nudge advances `last_email_at`, so the 24h gate applies from there. (Verified in code + pinned by mailer selftest "nudge: failed-signup game (NULL last_email_at) nudged now, not after 24h", 2026-10-05.) |
 | Anything else from `run_turn` (A8S transport failure, roster node down, timeout, bug) | NOT caught by `_turn_outcome`, `dispatch_batch`, or `run_poll_cycle` — propagates to `poll.py`, which logs "cycle failed; loop continues" and the loop survives | Nothing was sent, nothing was committed, nothing was marked seen (fresh ids only persist via `_store_seen` at the end of `run_poll_cycle`, which the raise skips). Next cycle re-polls and re-dispatches the whole batch — at-least-once, exactly as `run_poll_cycle`'s docstring designs. No duplicate emails (send_outcome never ran), no duplicate games (uncommitted signup rolls back; an empty `<GUID>.db` file may linger on disk — cosmetic, `iter_games` skips it). |
 | Handoff failure (`a8s tell` raises) | `send_outcome` raises `A8STransportError`; caller leaves the inbox file unconsumed and does NOT store the seen-set | Next cycle retries; Murph's per-(guid, turn) replay guard dedupes if the first tell actually landed (§2.6). Loud, never half-sent. |
 
@@ -41,5 +41,8 @@ If keeper's leg raises on turn 1: no email goes out, no partial game state
 commits, the poll loop logs it and retries in 5 minutes — the failure is loud
 (journal) and self-healing when the roster recovers. If the roster produces
 semantic garbage twice: the turn is dropped, recorded as failed in the DB, and
-the nudge sweep keeps the player warm after 24h. Both outcomes are survivable
-without human intervention; neither corrupts the game DB.
+the player gets ONE nudge within minutes (the failed signup leaves
+`last_email_at` NULL, so `maybe_nudge` fires at the end of the same cycle —
+NOT after 24h, as an earlier draft of this doc claimed); the 24h gate applies
+from that nudge onward. Both outcomes are survivable without human
+intervention; neither corrupts the game DB.
