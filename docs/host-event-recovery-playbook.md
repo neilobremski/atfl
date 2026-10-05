@@ -54,6 +54,26 @@ Confirmed casualties:
    `/etc/atfl/atfl.env` = `ATFL_GM=roster, ATFL_COMPOSITE=v2, ATFL_IMAGES=off`,
    `/var/lib/atfl/games/` = mailer.db only (no games — correct resting state).
 
+   SSH recipe (sessions run as root; `~` = /root, so the key and the
+   known_hosts file need explicit paths):
+
+   ```
+   ssh -o ConnectTimeout=10 -o UserKnownHostsFile=/home/hatch/.ssh/known_hosts \
+       -o ProxyCommand='nc -X connect -x hatch-egress-proxy:3130 %h %p' \
+       -i /home/hatch/workspace/oracle-vm/free-micro-1 opc@100.120.196.47 ...
+   ```
+
+   If `Host key verification failed` after a host event:
+   `/home/hatch/.ssh/known_hosts` may have been truncated (event #41: emptied
+   to 0 bytes, key survived only in `known_hosts.old` as a hashed-name entry
+   whose salt no longer matched the target name). Check the server's presented
+   fingerprint (`ssh -v` → `Server host key: ssh-ed25519 SHA256:...`) against
+   `ssh-keygen -lf /home/hatch/.ssh/known_hosts` — the known-good value is
+   `SHA256:xQcIvsEHxfEt75w9t17hP6CONdiclYqCmbcs9R04fOw`. If it matches, the key
+   is the genuine one; re-add it under the plain target name
+   (`100.120.196.47 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK38xIWWctWYtILwA/8EOo35/k6kU+DmKe0NoRpjF43C`),
+   never `-o StrictHostKeyChecking=no`.
+
 ## Integrity audit (host events can strand state)
 
 Before declaring recovery complete, check what was mid-flight when the
