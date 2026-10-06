@@ -110,8 +110,15 @@ SHORT_LABELS = {
 }
 
 
+# Map house palette (Neil's 2026-10-06 verdict: the vB sketch/dusk look).
+# The palette is the map's aesthetic identity; the time-of-day caption on
+# the panel keeps reporting the game clock truthfully (see render_map_svg's
+# palette parameter). Neil picked the dusk *look*, not dusk the clock hour.
+MAP_PALETTE = "dusk"
+
+
 def render_map_svg(places, edges, player_slug, time_of_day="morning",
-                   size=1024, labels=None, style="sketch"):
+                   size=1024, labels=None, style="sketch", palette=None):
     """Map as an SVG string. Same inputs/contract as map_panel.render_map.
 
     Only discovered places are ever drawn (the caller passes the filtered
@@ -119,7 +126,10 @@ def render_map_svg(places, edges, player_slug, time_of_day="morning",
     (falling back to the full name for unknown slugs). style is "sketch"
     (hand-drawn double frame, parchment label plates), "minimal" (single
     frame, filled node dots, small plates) or "plain" (no frame, thin
-    lines, bare labels beside nodes).
+    lines, bare labels beside nodes). palette selects the _TOD_PALETTE
+    entry the artwork uses; when None it follows time_of_day. The panel's
+    time-of-day caption always uses time_of_day, so a fixed house palette
+    (MAP_PALETTE) never makes the caption lie about the game clock.
 
     Labels get opaque parchment plates in the sketch/minimal styles —
     cairosvg ignores paint-order on text, so a stroke halo would not
@@ -129,7 +139,8 @@ def render_map_svg(places, edges, player_slug, time_of_day="morning",
         raise ValueError(f"unknown map style: {style!r}")
     if player_slug not in places:
         raise ValueError(f"player place {player_slug!r} not in places")
-    base, accent, ink = _TOD_PALETTE.get(time_of_day, _TOD_PALETTE["morning"])
+    pal = palette if palette is not None else time_of_day
+    base, accent, ink = _TOD_PALETTE.get(pal, _TOD_PALETTE["morning"])
     positions = layout_map(places, edges, size)
     lab = (labels if labels is not None
            else {s: SHORT_LABELS.get(s, n) for s, n in places.items()})

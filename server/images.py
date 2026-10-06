@@ -693,6 +693,7 @@ COMPOSITE_V2_SIZE = 1024
 # Asset kinds carry a "_v2" suffix so draft runs never collide with v1
 # archive files.
 from .map_svg import (  # noqa: E402
+    MAP_PALETTE,
     OVERLAY_MARGIN_PX,
     OVERLAY_PX,
     OVERLAY_V2_MARGIN_PX,
@@ -714,7 +715,9 @@ def build_turn_composite_v2(games_dir, guid, turn_no, provider,
     Size (2026-10-04, Neil's verdict, superseding 2026-10-03's half-size):
     1024px square scene; the map overlay is rendered at its 340px design
     size and LANCZOS-downscaled to 170px (rasterize_scaled) with a
-    14px margin.
+    14px margin. The map uses the house palette MAP_PALETTE (Neil's
+    2026-10-06 vB verdict); the panel's time-of-day caption still reports
+    the game clock.
 
     Steps: prompt from filtered state (+ game-clock time of day) ->
     scene from the provider -> map as SVG at full design size (from DB
@@ -751,7 +754,7 @@ def build_turn_composite_v2(games_dir, guid, turn_no, provider,
                  if a in discovered and b in discovered]
 
         svg_text = render_map_svg(discovered, edges, player_loc, tod,
-                                  size=OVERLAY_PX)
+                                  size=OVERLAY_PX, palette=MAP_PALETTE)
         map_png = rasterize_scaled(svg_text, OVERLAY_PX, overlay_px)
         scene_jpg = provider.generate_scene(s_prompt, size=size)
     except (ImageError, MapSvgError):
