@@ -50,6 +50,7 @@ log = logging.getLogger("atfl.relay")
 RELAY_ADDRESS = "murph@inkboxmail.com"  # player-facing address; Murph's side
 INBOUND_KIND = "atfl_inbound"
 OUTBOUND_KIND = "atfl_outbound"
+BUG_REPORT_KIND = "atfl_bug_report"  # engine -> Murph: a filed bug report
 
 # Inbound envelope fields the engine requires (kind checked separately).
 _INBOUND_FIELDS = ("from", "subject", "body_text", "inkbox_message_id")
@@ -57,6 +58,11 @@ _INBOUND_FIELDS = ("from", "subject", "body_text", "inkbox_message_id")
 # Outbound envelope fields hidden_files/atfl_relay_sender.py requires.
 OUTBOUND_FIELDS = ("kind", "game_guid", "turn_no", "to", "subject",
                    "body_text", "body_html", "attachments")
+
+# Bug-report envelope fields (docs/playtest-bug-handling.md: the relay
+# routes a BUG:-flagged message to Murph, never to the engine as a move).
+BUG_REPORT_FIELDS = ("kind", "game_guid", "bug_id", "from", "subject",
+                     "body_text", "reported_at")
 
 
 class A8STransportError(Exception):
@@ -275,6 +281,62 @@ def send_outbound(envelope, murph_node, node_root, a8s_bin=None,
 
 
 # ---------------------------------------------------------------------------
+# Bug reports: engine -> Murph handoff (docs/playtest-bug-handling.md)
+# ---------------------------------------------------------------------------
+def build_bug_report_envelope(game_guid, bug_id, from_addr, subject,
+                              body_text):
+    """One filed bug report, handed to Murph over A8S. The wire form is
+    plain JSON (no attachments). Routing note: the Murph-side consumer
+    classifies POSITIVELY on kind == "atfl_outbound", so a bug report
+    is NOT picked up by atfl_outbound_consumer — the tell blob stays in
+    Murph's inbox, where the regular message checker surfaces it for
+    triage. Nothing is ever mailed to the player by the engine for a
+    bug (the resolution email goes out through Murph)."""
+    from datetime import datetime, timezone
+    return {"kind": BUG_REPORT_KIND, "game_guid": game_guid, "bug_id": bug_id,
+            "from": from_addr, "subject": subject, "body_text": body_text,
+            "reported_at": datetime.now(timezone.utc).isoformat()}
+
+
+def send_bug_report(envelope, murph_node, node_root, a8s_bin=None,
+                    timeout_s=60):
+    """Hand one atfl_bug_report envelope to Murph: `a8s tell
+    <murph_node>` with the wire JSON on stdin. Retry once, then raise
+    A8STransportError (the mailer maps this to a loud `failed` outcome —
+    §2.6: nothing half-sent; the inbox file is not consumed, so the
+    next cycle retries)."""
+    missing = [f for f in BUG_REPORT_FIELDS if f not in envelope]
+    if missing:
+        raise A8STransportError(
+            f"{BUG_REPORT_KIND} envelope missing fields: {missing}")
+    if envelope.get("kind") != BUG_REPORT_KIND:
+        raise A8STransportError(f"not a {BUG_REPORT_KIND} envelope")
+    wire = json.dumps(envelope)
+    cmd = [a8s_bin or os.path.expanduser("~/.ar3/a8s"),
+           "tell", murph_node, "-"]
+    env = dict(os.environ)
+    env["TELL_OUTBOX_DIR"] = os.path.join(node_root, ".outbox")
+    last_err = None
+    for attempt in (1, 2):
+        try:
+            proc = subprocess.run(
+                cmd, input=wire.encode("utf-8"), capture_output=True,
+                cwd=node_root, env=env, timeout=timeout_s)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            last_err = f"{type(e).__name__}: {e}"
+        else:
+            if proc.returncode == 0:
+                return True
+            last_err = (proc.stderr.decode(errors="replace").strip()
+                        or proc.stdout.decode(errors="replace").strip()
+                        or f"exit {proc.returncode}")
+        log.warning("relay: bug-report tell to %s failed (attempt %d/2): %s",
+                    murph_node, attempt, last_err)
+    raise A8STransportError(
+        f"a8s tell {murph_node} failed twice (bug report): {last_err}")
+
+
+# ---------------------------------------------------------------------------
 # Selftest — the pinned contract as an executable spec
 # ---------------------------------------------------------------------------
 def _check(name, cond):
@@ -350,6 +412,42 @@ def selftest():
     _check("wire: base64-ascii in the serialized text",
            base64.b64encode(b"\xff\xd8fake-jpeg\xff\xd9").decode("ascii")
            in wire)
+
+    # -- bug-report envelope (docs/playtest-bug-handling.md routing) --
+    br = build_bug_report_envelope("guid-9", 7, "masta@gibdon.com",
+                                   "BUG: map label wrong",
+                                   "the map showed a place I've never been")
+    _check("bugreport: envelope keys exactly the pinned set",
+           set(br.keys()) == set(BUG_REPORT_FIELDS))
+    _check("bugreport: kind is distinct from atfl_outbound",
+           br["kind"] == BUG_REPORT_KIND
+           and br["kind"] != OUTBOUND_KIND)
+    _check("bugreport: carries game, bug id, reporter, body",
+           br["game_guid"] == "guid-9" and br["bug_id"] == 7
+           and br["from"] == "masta@gibdon.com"
+           and br["body_text"].startswith("the map showed"))
+    _check("bugreport: wire form is plain JSON text",
+           json.loads(json.dumps(br))["kind"] == BUG_REPORT_KIND)
+    try:
+        bugtmp = tempfile.mkdtemp(prefix="relay-bugreport-")
+        send_bug_report({"kind": BUG_REPORT_KIND, "game_guid": "g"},
+                        "murph", bugtmp, a8s_bin="/bin/false", timeout_s=5)
+        _check("bugreport: missing fields raise", False)
+    except A8STransportError:
+        _check("bugreport: missing fields raise", True)
+    try:
+        bad = dict(br)
+        bad["kind"] = OUTBOUND_KIND
+        send_bug_report(bad, "murph", bugtmp, a8s_bin="/bin/false", timeout_s=5)
+        _check("bugreport: wrong kind raises", False)
+    except A8STransportError:
+        _check("bugreport: wrong kind raises", True)
+    try:
+        send_bug_report(br, "murph", bugtmp, a8s_bin="/bin/false", timeout_s=5)
+        _check("bugreport: a8s failure raises loudly (no half-send)", False)
+    except A8STransportError as e:
+        _check("bugreport: a8s failure raises loudly (no half-send)",
+               "failed twice" in str(e))
 
     # -- poll_inbound against a fake agents dir --
     tmp = tempfile.mkdtemp(prefix="relay-inbox-")

@@ -26,9 +26,19 @@ Neil's question: "How are we going to handle bugs as I play the game?"
 
 **Routing.** A `BUG:`-flagged message is a Murph handoff, not player
 input: the relay routes it to Murph and never feeds it to the engine as
-a move. (TO-BUILD: the relay needs a `BUG:` keyword rule; currently any
-reply would reach the engine as player_input. Until it lands, Murph
-screens inbound manually during playtest — acceptable for one player.)
+a move. SHIPPED 2026-10-06 (session #127): `dispatch.is_bug_report`
+(start of subject after Re: prefixes, or first line of body,
+case-insensitive) short-circuits dispatch, files the report in the
+game's `bugs` table, and pauses the game (no turns, no idle turns, no
+nudges — the pause is derived from open rows, so closing the last bug
+unpauses automatically). The report rides to Murph as an
+`atfl_bug_report` A8S tell, which the Murph-side consumer deliberately
+does NOT pick up (positive classification on `atfl_outbound`) — the
+blob stays in Murph's inbox, where the regular message checker surfaces
+it for triage. Nothing is mailed to the player by the engine for a bug;
+the resolution email goes out through Murph. Regression cover:
+`dispatch.selftest` (31), `mailer.selftest` (37), `murph_relay.selftest`
+(bugreport block).
 
 **Triage (within a day — this is a slow game, the digest cycle is the
 SLA).** Three buckets:
@@ -70,9 +80,11 @@ safe state until it's resolved.
 
 ## Standing notes
 
-- One player (Neil) for the playtest: manual screening of inbound until
-  the `BUG:` relay rule ships. Multiplayer later gets the same protocol
-  per game (a bug pauses only the reporter's game, not everyone's).
+- One player (Neil) for the playtest: the `BUG:` relay rule shipped
+  2026-10-06, so inbound screening is automatic now; Murph triages the
+  `atfl_bug_report` tells that land in his inbox. Multiplayer later gets
+  the same protocol per game (a bug pauses only the reporter's game, not
+  everyone's).
 - Bug reports and their resolutions are logged in the goal progress log
   under a `## Playtest bugs` section — the running record of what broke
   and what it taught us.

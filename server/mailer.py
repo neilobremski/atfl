@@ -147,9 +147,24 @@ def send_outcome(games_dir, outcome, inbound, murph_node, node_root,
     cycle retries.
     """
     relay = _relay if relay is None else relay
-    if outcome.action in ("failed", "ignored"):
-        return False, None  # §2.6: nothing leaves on failure
+    if outcome.action in ("failed", "ignored", "paused"):
+        return False, None  # §2.6: nothing leaves on failure; a paused
+                            # move is held, not sent
     to_addr = outcome.sender
+
+    if outcome.action == "bug":
+        # A filed bug report is a Murph handoff, never a player email:
+        # the envelope rides `a8s tell` with kind atfl_bug_report, which
+        # the Murph-side consumer does NOT pick up (positive
+        # classification on atfl_outbound) — the blob stays in Murph's
+        # inbox, where the regular message checker surfaces it for
+        # triage. The player hears about it through Murph, not the
+        # engine.
+        envelope = relay.build_bug_report_envelope(
+            outcome.guid, outcome.bug_id, outcome.sender,
+            outcome.subject or "", outcome.body or "")
+        relay.send_bug_report(envelope, murph_node, node_root)
+        return True, "bug report handed to Murph"
 
     if outcome.action == "turn_email":
         jpeg, img_note = _turn_composite(games_dir, outcome, images)
@@ -233,7 +248,9 @@ def maybe_nudge(games_dir, murph_node, node_root, relay=None,
     """§2.3/§5.3 standalone-nudge fallback (mailer-level): for each active
     game with no handoff in the last max_age_h, hand one short system
     nudge envelope to Murph. Advances nothing, mutates nothing in the
-    world tables (only the last_email_at bookkeeping column)."""
+    world tables (only the last_email_at bookkeeping column). Games with
+    an open bug are paused: no nudges (docs/playtest-bug-handling.md)."""
+    from .dispatch import game_paused  # local import: mailer is dispatch's client
     relay = _relay if relay is None else relay
     sent = []
     cutoff = (datetime.now(timezone.utc)
@@ -244,6 +261,8 @@ def maybe_nudge(games_dir, murph_node, node_root, relay=None,
         if not (name.endswith(".db") and len(name) == 36 + 3):
             continue
         guid = name[:-3]
+        if game_paused(games_dir, guid):
+            continue  # bug pause: the player gets no expiry nudges
         db = _open_game_db(games_dir, guid)
         try:
             row = db.execute(
@@ -393,6 +412,8 @@ class FakeGmail:
 
     build_outbound_envelope = staticmethod(
         _relay.build_outbound_envelope)  # the pinned builder, verbatim
+    build_bug_report_envelope = staticmethod(
+        _relay.build_bug_report_envelope)  # bug-report builder, verbatim
 
     def poll_inbound(self, engine_node, agents_dir=None):
         return [(m, m["id"]) for m in self.inbox]
@@ -409,6 +430,18 @@ class FakeGmail:
                 f"atfl_outbound envelope missing fields: {missing}")
         if envelope.get("kind") != _relay.OUTBOUND_KIND:
             raise _relay.A8STransportError("not an atfl_outbound envelope")
+        self.outbox.append({"envelope": dict(envelope),
+                            "murph_node": murph_node,
+                            "node_root": node_root})
+        return True
+
+    def send_bug_report(self, envelope, murph_node, node_root):
+        missing = [f for f in _relay.BUG_REPORT_FIELDS if f not in envelope]
+        if missing:
+            raise _relay.A8STransportError(
+                f"atfl_bug_report envelope missing fields: {missing}")
+        if envelope.get("kind") != _relay.BUG_REPORT_KIND:
+            raise _relay.A8STransportError("not an atfl_bug_report envelope")
         self.outbox.append({"envelope": dict(envelope),
                             "murph_node": murph_node,
                             "node_root": node_root})
@@ -592,6 +625,59 @@ def selftest():
            and len(relay2.outbox) == n1 + 1 and lea is not None)
     _check("nudge: second sweep quiet after the immediate nudge",
            maybe_nudge(tmp, "murph", "/node/root", relay=relay2) == [])
+
+    # -- bug path: BUG: inbound files, pauses, hands off, never turns ---
+    import uuid as _uuid2
+    from . import dispatch as _dispatch
+    bguid = str(_uuid2.uuid4())
+    bdb = _schema.create_db(os.path.join(tmp, bguid + ".db"))
+    bdb.execute("INSERT INTO games (guid, player_email, scenario_id, status,"
+                " turn_no) VALUES (?,?,?,?,?)",
+                (bguid, "bugplayer@example.com", "fog-line-mystery-v1",
+                 "active", 0))
+    bdb.commit()
+    bdb.close()
+    relay3 = FakeGmail()
+    relay3._next = 5000  # the selftest's shared games_dir seen-set already
+    # holds ink-1000.. from earlier blocks; a fresh range keeps these
+    # inbounds actually fresh
+    relay3.queue_inbound("bugplayer@example.com", "Re: [ATFL] turn 2",
+                         f"BUG: the map label is wrong\nGame code: {bguid}")
+    res3 = run_poll_cycle(tmp, MockGM(), "atfl-server", "murph", "/node/root",
+                          turn_len_min=60, images={"mode": "off"},
+                          relay=relay3)
+    _check("bug: full cycle -> one 'bug' outcome, handed off",
+           len(res3["sent"]) == 1 and res3["sent"][0]["action"] == "bug"
+           and res3["sent"][0]["handoff"] is True)
+    kinds = [e["envelope"]["kind"] for e in relay3.outbox]
+    _check("bug: the handoff is exactly one atfl_bug_report (never a"
+           " player email)",
+           len(relay3.outbox) == 1 and kinds == ["atfl_bug_report"])
+    benv = relay3.outbox[0]["envelope"]
+    _check("bug: report envelope carries game + bug id + reporter + body",
+           benv["game_guid"] == bguid and isinstance(benv["bug_id"], int)
+           and benv["bug_id"] >= 1 and benv["from"] == "bugplayer@example.com"
+           and "map label" in benv["body_text"])
+    bdb2 = _open_game_db(tmp, bguid)
+    try:
+        turns_n = bdb2.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+    finally:
+        bdb2.close()
+    _check("bug: no turn ran for the report", turns_n == 0)
+    _check("bug: game is paused after filing", _dispatch.game_paused(tmp, bguid))
+    # a normal move while paused: held, nothing to the player
+    relay3.queue_inbound("bugplayer@example.com", "Re: [ATFL] turn 2",
+                         f"I walk north\nGame code: {bguid}")
+    res4 = run_poll_cycle(tmp, MockGM(), "atfl-server", "murph", "/node/root",
+                          turn_len_min=60, images={"mode": "off"},
+                          relay=relay3)
+    _check("bug: move during pause -> 'paused' action, not a turn",
+           [s["action"] for s in res4["sent"]] == ["paused"])
+    _check("bug: move during pause sends nothing to anyone",
+           len(relay3.outbox) == 1)
+    # ...and the nudge sweep stays quiet on the paused game too
+    _check("bug: paused game gets no nudge",
+           maybe_nudge(tmp, "murph", "/node/root", relay=FakeGmail()) == [])
 
     # -- _turn_composite: v1/v2 wiring behind ATFL_COMPOSITE (#91) --
     # Seeded game (discovered trailhead → map has something to draw),

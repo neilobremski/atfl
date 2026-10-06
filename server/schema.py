@@ -21,6 +21,21 @@ CREATE TABLE games (
     -- columns are retired — pre-relay DB files keep them vestigially.
     last_email_at TEXT       -- when we last handed anything to Murph
 );
+-- Bug reports (docs/playtest-bug-handling.md): an open row pauses the
+-- game (no turns, no idle turns, no nudges). dispatch.ensure_bugs_table
+-- is the idempotent backstop for DBs created before this column family.
+CREATE TABLE IF NOT EXISTS bugs (
+    id INTEGER PRIMARY KEY,
+    game_guid TEXT,
+    reporter TEXT NOT NULL,
+    subject TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    reported_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',   -- open | closed
+    resolution_note TEXT,
+    closed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_bugs_game ON bugs(game_guid);
 CREATE TABLE places (
     id INTEGER PRIMARY KEY,
     slug TEXT UNIQUE NOT NULL,
