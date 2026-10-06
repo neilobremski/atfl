@@ -360,7 +360,15 @@ def selftest():
     # half-size verdict): 1024 scene, map rendered at its 340 design size
     # and downscaled to 170. Written by hidden_files/gen_map_proofs_20261004.py.
     PROOF_SVG = os.path.join(HIDDEN, "map_svg_proof_20261004.svg")
-    PROOF_JPG = os.path.join(HIDDEN, "composite_proof_20261004.jpg")
+    # Refreshed 2026-10-06 (session #128): the 10-04 proof composite was
+    # generated with the pre-dusk default palette; Neil's 2026-10-06 vB
+    # verdict made dusk the house palette, so the golden composite was
+    # regenerated with the current builder + the same proof scene PNG.
+    # The 10-04 file stays on disk as provenance. The red it replaced was
+    # a REAL rendering change (palette), not encoder drift — verified by
+    # pixel census: default-palette build vs 10-04 proof = 0 differing px,
+    # dusk build vs 10-04 proof = overlay region + adjacent JPEG blocks.
+    PROOF_JPG = os.path.join(HIDDEN, "composite_proof_20261006.jpg")
     SCENE_SRC = os.path.join(HIDDEN, "composite_proof_scene_20261004.png")
 
     games_dir = tempfile.mkdtemp(prefix="atfl-mapsvg-")
@@ -485,7 +493,13 @@ def selftest():
            str([r[0] for r in rows]))
 
     # -- proof reproduction: same scene + same state through the server
-    #    pipeline must byte-match the shipped proof jpeg --
+    #    pipeline must reproduce the shipped proof jpeg's RENDERING --
+    # Pixel-equality on the decoded frames, not byte-equality: the JPEG
+    # byte encoding drifts with the host's Pillow/libjpeg (measured
+    # 2026-10-06: decoded pixels identical, 45B encoding delta, after a
+    # cairosvg reinstall pulled a newer Pillow), and a control that reds
+    # on encoder drift is a control that cannot pass. The SVG string
+    # parity above stays byte-exact — text has no encoder.
     if os.path.exists(SCENE_SRC) and os.path.exists(PROOF_JPG):
         with open(SCENE_SRC, "rb") as f:
             proof_scene = f.read()
@@ -497,9 +511,14 @@ def selftest():
         res2 = build_turn_composite_v2(games_dir, guid, 2, ProofScene())
         with open(PROOF_JPG, "rb") as f:
             proof_jpeg = f.read()
-        _check("v2 reproduces the shipped proof jpeg byte-for-byte",
-               res2["jpeg"] == proof_jpeg,
-               f"server {len(res2['jpeg'])}B vs proof {len(proof_jpeg)}B")
+        srv = Image.open(io.BytesIO(res2["jpeg"])).convert("RGB")
+        prf = Image.open(io.BytesIO(proof_jpeg)).convert("RGB")
+        same = (srv.size == prf.size
+                and list(srv.getdata()) == list(prf.getdata()))
+        _check("v2 reproduces the shipped proof rendering (decoded pixels)",
+               same,
+               f"server {len(res2['jpeg'])}B vs proof {len(proof_jpeg)}B, "
+               f"frames {srv.size}/{prf.size}")
     else:
         # Same workstation-only coupling as the svg parity check above.
         _check("v2 reproduces the shipped proof jpeg byte-for-byte "
