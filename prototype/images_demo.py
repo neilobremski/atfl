@@ -11,8 +11,6 @@ import os
 import sqlite3
 import sys
 import tempfile
-from email import policy
-from email.parser import BytesParser
 
 sys.path.insert(0, "/home/hatch/workspace/above-the-fog-line")
 
@@ -28,7 +26,10 @@ from server.images import (ImageError, GeminiImageProvider, HFImageProvider,
                            build_turn_composite, get_character_ref,
                            scene_prompt, selfie_prompt, stitch_composite,
                            time_of_day_word)
-from server.mailer import FakeGmail, build_raw, run_poll_cycle, GAME_ADDRESS
+from server.mailer import (FakeGmail, run_poll_cycle,
+                           _resolve_composite_marker)
+from server.murph_relay import build_outbound_envelope
+from server.render import COMPOSITE_CID, COMPOSITE_IMG_MARKER
 from server.schema import create_db
 from server import seed as _seed
 from server.turn_loop import filtered_view
@@ -182,60 +183,64 @@ check("default quality matches the constant",
                                          Image.open(io.BytesIO(b1)), size=256,
                                          quality=COMPOSITE_JPEG_QUALITY)))
 
-# --- 7. outbound attachment path: build_raw with inline composite ---
-raw = build_raw("game@example.com", PLAYER, "subject", "body",
-                html_body="<p>body</p><img src=\"cid:turn-composite\">",
-                attachments=[("turn-1-composite.jpg", comp1["jpeg"],
-                              "image/jpeg", "turn-composite")])
-parsed = BytesParser(policy=policy.default).parsebytes(raw)
-atts = list(parsed.iter_attachments())
-check("one image/jpeg attachment rides along",
-      len(atts) == 1 and atts[0].get_content_type() == "image/jpeg")
-check("attachment filename set",
-      atts[0].get_filename() == "turn-1-composite.jpg")
-check("composite marked inline with a Content-ID (Neil's inline-images req)",
-      atts[0]["Content-ID"] == "<turn-composite>"
-      and atts[0].get_content_disposition() == "inline")
-check("body text still intact", parsed.get_body(preferencelist=("plain",))
-      .get_content().strip() == "body")
-check("HTML twin rides along with the cid reference",
-      parsed.get_body(preferencelist=("html",)).get_content())
-# 3-tuple attachments (no cid) stay plain downloadable attachments
-raw2 = build_raw("game@example.com", PLAYER, "subject", "body",
-                 attachments=[("notes.txt", b"hi", "text/plain")])
-att2 = list(BytesParser(policy=policy.default).parsebytes(raw2)
-            .iter_attachments())[0]
-check("no-cid attachment has no Content-ID",
-      att2["Content-ID"] is None
-      and att2.get_content_disposition() == "attachment")
+# --- 7. outbound attachment path: the atfl_outbound envelope contract ---
+# (relay edition, 2026-10-02: the engine no longer builds MIME — build_raw
+# is gone. The composite rides as an envelope attachment with the pinned
+# content_id, and the Murph-side sender renders inline images as
+# cid:<content_id> per digest_send_inkbox.py.)
+import re as _re
+env = build_outbound_envelope(
+    guid, 1, PLAYER, "subject", "body",
+    "<p>body</p>" + COMPOSITE_IMG_MARKER, composite_jpeg=comp1["jpeg"])
+atts = env["attachments"]
+check("one composite attachment rides in the envelope", len(atts) == 1)
+check("attachment content_id is the pinned cid convention",
+      atts[0]["content_id"] == COMPOSITE_CID == "composite")
+check("attachment filename names the turn",
+      atts[0]["filename"] == "turn-1-composite.jpg")
+check("attachment bytes are the composite JPEG",
+      atts[0]["bytes"] == comp1["jpeg"] and atts[0]["bytes"][:2] == b"\xff\xd8")
+resolved = _resolve_composite_marker(env["body_html"], True)
+check("marker resolves to exactly one inline img tag",
+      resolved.count("<img") == 1 and COMPOSITE_IMG_MARKER not in resolved)
+cid = _re.search(r'cid:([a-z0-9-]+)', resolved).group(1)
+check("html cid names the attachment's content_id (else a broken image)",
+      cid == atts[0]["content_id"])
+check("body text still intact", env["body_text"] == "body")
+# text-only turn: no attachments, marker dropped, never a broken image
+env2 = build_outbound_envelope(
+    guid, 2, PLAYER, "subject", "body",
+    "<p>body</p>" + COMPOSITE_IMG_MARKER, composite_jpeg=None)
+check("no composite: no attachments", env2["attachments"] == [])
+no_img = _resolve_composite_marker(env2["body_html"], False)
+check("no composite: marker dropped, no img tag",
+      COMPOSITE_IMG_MARKER not in no_img and "<img" not in no_img)
 
 # --- 8. end to end: poll cycle with stub images attaches the composite ---
 fake = FakeGmail()
-fake.queue_inbound(PLAYER, "start", "start",
-                   header_message_id="<signup-img@fake>")
+fake.queue_inbound(PLAYER, "start", "start")
 gm = MockGM()
-res = run_poll_cycle(games_dir, fake, gm, game_address=GAME_ADDRESS,
-                     images={"mode": "stub", "api_key": None})
-check("turn email sent with images on",
-      len(res["sent"]) == 1 and res["sent"][0]["action"] == "turn_email")
-check("sent note records the composite",
+res = run_poll_cycle(games_dir, gm, "atfl-server", "murph", "/node/root",
+                     images={"mode": "stub"}, relay=fake)
+check("turn email handed off with images on",
+      len(res["sent"]) == 1 and res["sent"][0]["action"] == "turn_email"
+      and res["sent"][0]["handoff"] is True)
+check("handoff note records the composite",
       res["sent"][0]["note"] and "composite attached" in res["sent"][0]["note"])
-sent = fake.outbox[-1]["parsed"]
-sent_atts = list(sent.iter_attachments())
-check("outbound turn email carries the composite JPEG",
+env8 = fake.outbox[-1]["envelope"]
+check("envelope is atfl_outbound to the player",
+      env8["kind"] == "atfl_outbound" and env8["to"] == PLAYER)
+sent_atts = env8["attachments"]
+check("outbound envelope carries the composite JPEG",
       len(sent_atts) == 1
-      and sent_atts[0].get_content_type() == "image/jpeg"
-      and sent_atts[0].get_filename().endswith("-composite.jpg"))
-check("composite part is inline via Content-ID",
-      sent_atts[0]["Content-ID"] == "<turn-composite>"
-      and sent_atts[0].get_content_disposition() == "inline")
-sent_html = sent.get_body(preferencelist=("html",)).get_content()
+      and sent_atts[0]["content_id"] == "composite"
+      and sent_atts[0]["filename"].endswith("-composite.jpg")
+      and sent_atts[0]["bytes"][:2] == b"\xff\xd8")
 check("HTML twin renders the composite inline (cid reference)",
-      'src="cid:turn-composite"' in sent_html
-      and "TURN_COMPOSITE" not in sent_html)
-body = sent.get_body(preferencelist=("plain",)).get_content()
+      'src="cid:composite"' in env8["body_html"]
+      and COMPOSITE_IMG_MARKER not in env8["body_html"])
 check("turn body still complete text with image on",
-      "Game code:" in body and len(body) > 100)
+      "Game code:" in env8["body_text"] and len(env8["body_text"]) > 100)
 
 # --- 9. failure policy: a broken provider never fails the turn ---
 class FailingProvider:
@@ -245,55 +250,59 @@ class FailingProvider:
         raise RuntimeError("model exploded")
 
 fake2 = FakeGmail()
-fake2.queue_inbound(PLAYER, "start", "start",
-                    header_message_id="<signup-fail@fake>")
+fake2.queue_inbound(PLAYER, "start", "start")
 games2 = tempfile.mkdtemp(prefix="atfl-images-fail-")
-# _turn_attachments resolves build_provider from server.images at call
+# _turn_composite resolves build_provider from server.images at call
 # time, so patching the module attribute steers it at the source.
 import server.images as _images
 _real_build = _images.build_provider
-_images.build_provider = lambda mode, key=None: FailingProvider()
+_images.build_provider = lambda mode, **kw: FailingProvider()
 try:
-    res2 = run_poll_cycle(games2, fake2, gm, game_address=GAME_ADDRESS,
-                          images={"mode": "stub", "api_key": None})
+    res2 = run_poll_cycle(games2, gm, "atfl-server", "murph", "/node/root",
+                          images={"mode": "stub"}, relay=fake2)
 finally:
     _images.build_provider = _real_build
-check("broken provider: turn still sent",
-      len(res2["sent"]) == 1 and res2["sent"][0]["message_id"] is not None)
+check("broken provider: turn still handed off",
+      len(res2["sent"]) == 1 and res2["sent"][0]["handoff"] is True)
 check("broken provider: note says images skipped",
       res2["sent"][0]["note"] and "images skipped" in res2["sent"][0]["note"])
-check("broken provider: no attachment on the text-only send",
-      len(list(fake2.outbox[-1]["parsed"].iter_attachments())) == 0)
+check("broken provider: no attachment on the text-only handoff",
+      fake2.outbox[-1]["envelope"]["attachments"] == [])
 
 # --- 10. images off: cycle identical to the old text-only path ---
 fake3 = FakeGmail()
-fake3.queue_inbound(PLAYER, "start", "start",
-                    header_message_id="<signup-off@fake>")
+fake3.queue_inbound(PLAYER, "start", "start")
 games3 = tempfile.mkdtemp(prefix="atfl-images-off-")
-res3 = run_poll_cycle(games3, fake3, gm, game_address=GAME_ADDRESS,
-                      images={"mode": "off", "api_key": None})
-check("images off: turn sent, no attachment",
-      res3["sent"][0]["message_id"] is not None
-      and len(list(fake3.outbox[-1]["parsed"].iter_attachments())) == 0)
+res3 = run_poll_cycle(games3, gm, "atfl-server", "murph", "/node/root",
+                      images={"mode": "off"}, relay=fake3)
+check("images off: turn handed off, no attachment",
+      res3["sent"][0]["handoff"] is True
+      and fake3.outbox[-1]["envelope"]["attachments"] == [])
 check("images off: no assets dir created",
       not os.path.exists(os.path.join(games3, "assets")))
 
-# --- 11. config: images flag validation ---
-os.environ.update({"ATFL_GAME_ADDRESS": "game@example.com"})
+# --- 11. config: images flag validation (relay edition, 2026-10-02) ---
+# ATFL_GAME_ADDRESS is retired (the player-facing address is Murph's
+# operational detail); ATFL_A8S_NODE_ROOT is required — startup refuses
+# a half-wired send path.
+BASE = {"ATFL_A8S_NODE_ROOT": "/node/root"}
 check("default ATFL_IMAGES is off",
-      _config.load({"ATFL_GAME_ADDRESS": "x@y.z"})["images_mode"] == "off")
+      _config.load(dict(BASE))["images_mode"] == "off")
 try:
-    _config.load({"ATFL_GAME_ADDRESS": "x@y.z", "ATFL_IMAGES": "bogus"})
+    _config.load(dict(BASE, ATFL_IMAGES="bogus"))
     check("bogus ATFL_IMAGES raises", False)
 except _config.ConfigError:
     check("bogus ATFL_IMAGES raises", True)
 try:
-    _config.load({"ATFL_GAME_ADDRESS": "x@y.z", "ATFL_IMAGES": "real"})
+    _config.load(dict(BASE, ATFL_IMAGES="real"))
     check("real without key raises", False)
 except _config.ConfigError:
     check("real without key raises", True)
-cfg = _config.load({"ATFL_GAME_ADDRESS": "x@y.z", "ATFL_IMAGES": "stub"})
+cfg = _config.load(dict(BASE, ATFL_IMAGES="stub"))
 check("stub config passes", cfg["images_mode"] == "stub")
+cfg_p = _config.load(dict(BASE, ATFL_IMAGES="pollinations"))
+check("pollinations config passes (keyless, no token required)",
+      cfg_p["images_mode"] == "pollinations")
 
 # --- 12. real provider REST contract: hermetic, no network ---
 import base64 as _b64

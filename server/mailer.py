@@ -41,7 +41,7 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 
-from .render import (render_nudge, COMPOSITE_CID, COMPOSITE_IMG_MARKER,
+from .render import (render_nudge, COMPOSITE_IMG_MARKER,
                      COMPOSITE_IMG_TAG)
 from . import schema as _schema
 from . import murph_relay as _relay

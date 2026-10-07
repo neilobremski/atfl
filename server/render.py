@@ -17,10 +17,12 @@ sends the idle turn as the daily touch instead, and the nudge is only
 needed if a game somehow produces no turn email in 24h — recorded as
 a mailer detail, not built here.
 
-The Phase 3 composite, when attached, is INLINE: the mailer marks the
-JPEG part with Content-ID <turn-composite> and substitutes
-COMPOSITE_IMG_MARKER in the HTML with an <img src="cid:..."> tag, so
-Gmail renders it inside the email body. When no composite attaches,
+The Phase 3 composite, when attached, is INLINE: the composite JPEG rides in
+the atfl_outbound envelope as an attachment with content_id "composite"
+(murph_relay.build_outbound_envelope), and the mailer substitutes
+COMPOSITE_IMG_MARKER in the HTML twin with an <img src="cid:composite"> tag —
+the sender's cid:<content_id> convention (digest_send_inkbox.py) — so the
+player's client renders it inside the email body. When no composite attaches,
 the marker is dropped (no broken image).
 """
 import html as _html
@@ -33,11 +35,17 @@ TIME_OF_DAY_START_MIN = 420  # DESIGN §3.1: game_clock_min=0 <=> 07:00 local
 # 2026-09-27 (Neil): no open prompt. Turn emails end with the world
 # blocks; a player who does nothing just gets the next turn's
 # catch-up line. OPEN_PROMPT is deleted, not deprecated.
-COMPOSITE_CID = "turn-composite"
+# The cid the HTML twin references MUST equal the envelope attachment's
+# content_id (murph_relay.build_outbound_envelope) — the sender renders
+# inline images as cid:<content_id>. A mismatch here is a broken image in
+# every image-enabled turn email. (2026-10-07: the Gmail-era "turn-composite"
+# was still in the tag while the envelope has said "composite" since the
+# Oct 2 relay rewrite — caught by the images-demo repair, session #139.)
+COMPOSITE_CID = "composite"
 COMPOSITE_IMG_MARKER = "[[TURN_COMPOSITE]]"
 COMPOSITE_IMG_TAG = (
     '<figure class="turn-img">'
-    '<img src="cid:turn-composite" alt="This turn, rendered">'
+    f'<img src="cid:{COMPOSITE_CID}" alt="This turn, rendered">'
     "</figure>"
 )
 

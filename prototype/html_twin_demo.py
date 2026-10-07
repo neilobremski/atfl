@@ -16,7 +16,9 @@ hermetic, deterministic checks — no network, no provider keys:
 4. Structure guards: dateline styling only for the true first-block dateline
    (a narrative line that merely looks like one stays a plain paragraph);
    the closer/footer/hr/section rules; the composite marker passes through
-   body_to_html verbatim and is resolved only by mailer._html_for_send.
+   body_to_html verbatim and is resolved only by
+   mailer._resolve_composite_marker (relay edition: the attachment rides in
+   the atfl_outbound envelope now, not in MIME).
 
 All green = the twin is a deterministic, fact-faithful shadow of the plain
 body, and every email type (turn, death turn, nudge, clarification) honors it.
@@ -31,7 +33,7 @@ sys.path.insert(0, "/home/hatch/workspace/above-the-fog-line")
 from server.render import (render_turn_email, render_nudge, render_clarification,
                            body_to_html, DEATH_CLOSER, COMPOSITE_IMG_MARKER,
                            COMPOSITE_CID)
-from server.mailer import _html_for_send
+from server.mailer import _resolve_composite_marker
 from server.turn_loop import TurnResult
 
 
@@ -126,7 +128,7 @@ voc = words(vis) - words(text) - ALT_ALLOWLIST
 check("visible HTML words ⊆ plain-body words + alt allowlist", not voc)
 check("the alt allowlist is actually exercised (tag present after substitution)",
       "alt=\"This turn, rendered\"" in
-      _html_for_send(html, [("c.jpg", b"x", "image/jpeg", COMPOSITE_CID)]))
+      _resolve_composite_marker(html, True))
 
 # --- 3. Escaping: hostile content never becomes raw HTML -------------------
 nasty = ("While you were quiet: nothing.\n\n"
@@ -161,16 +163,18 @@ check("death closer gets the closer class and the exact wording",
       in render_turn_email(GUID, view_with(), turn_result("Gone.", game_over=True))[2])
 
 # --- 5. Marker resolution at the mailer layer ------------------------------
+# The cid the tag references must equal the envelope attachment's
+# content_id (COMPOSITE_CID) — the sender renders inline images as
+# cid:<content_id>. A mismatch is a broken image in the player's email.
 raw = html  # from the normal turn in section 1
-with_img = _html_for_send(raw, [("turn-3-composite.jpg", b"jpegbytes",
-                                 "image/jpeg", COMPOSITE_CID)])
+with_img = _resolve_composite_marker(raw, True)
 check("with the composite attached: exactly one inline img tag",
-      with_img.count('<img src="cid:turn-composite"') == 1)
+      with_img.count(f'<img src="cid:{COMPOSITE_CID}"') == 1)
 check("with the composite attached: marker fully resolved",
       COMPOSITE_IMG_MARKER not in with_img)
 check("with the composite attached: alt text is the only new phrase",
       not (words(visible_text(with_img)) - words(text) - ALT_ALLOWLIST))
-no_img = _html_for_send(raw, [])
+no_img = _resolve_composite_marker(raw, False)
 check("without the composite: marker dropped, no broken image",
       COMPOSITE_IMG_MARKER not in no_img and "<img" not in no_img)
 
