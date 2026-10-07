@@ -22,6 +22,8 @@ from server import config as _config
 from server.gm import MockGM
 from server.images import (ImageError, GeminiImageProvider, HFImageProvider,
                            HF_SCENE_MODEL, HF_SELFIE_MODEL,
+                           POLLINATIONS_BASE, POLLINATIONS_MODEL,
+                           PollinationsImageProvider,
                            StubImageProvider, build_provider,
                            build_turn_composite, get_character_ref,
                            scene_prompt, selfie_prompt, stitch_composite,
@@ -517,5 +519,85 @@ try:
     check("hf non-image payload raises", False)
 except ImageError:
     check("hf non-image payload raises", True)
+
+# -- Pollinations (keyless) provider -----------------------------------------
+# Contract: GET https://image.pollinations.ai/prompt/{urlencoded-prompt}?
+# width=&height=&model=flux&seed=<deterministic-on-prompt>&nologo=true&private=true
+# -> 200 image/jpeg directly. Verified live 2026-10-07 from the sandbox
+# (256px smoke: 200, JPEG, ~5.5s).
+def _pollinations_ok(seen):
+    def _fn(url, headers):
+        seen.append((url, dict(headers)))
+        return 200, _fake_png(256)  # endpoint serves JPEG; _to_jpeg normalizes
+    return _fn
+
+seen_p = []
+pp = PollinationsImageProvider(request_fn=_pollinations_ok(seen_p))
+pscene = pp.generate_scene("mist on the ridge")
+check("pollinations scene returns image bytes", len(pscene) > 1000)
+check("pollinations normalizes to JPEG", pscene[:2] == b"\xff\xd8")
+
+purl, pheaders = seen_p[0]
+import hashlib as _hashlib
+want_seed = int(_hashlib.sha1(b"mist on the ridge").hexdigest(), 16) % 2**31
+check("pollinations request hits the keyless GET endpoint",
+      purl == (f"{POLLINATIONS_BASE}mist%20on%20the%20ridge"
+               f"?width=1024&height=1024&model={POLLINATIONS_MODEL}"
+               f"&seed={want_seed}&nologo=true&private=true"))
+check("pollinations sends no secret in any header",
+      all(v != "Bearer hf_test" for v in pheaders.values())
+      and "Authorization" not in pheaders)
+check("pollinations requests private generation", "private=true" in purl)
+
+seen_p2 = []
+pp2 = PollinationsImageProvider(request_fn=_pollinations_ok(seen_p2))
+href_p = _fake_png(128)
+pp2.generate_selfie("damp hiker selfie", character_ref=href_p)
+purl2 = seen_p2[0][0]
+check("pollinations selfie is instruction-prefixed t2i",
+      "Keep%20the%20SAME%20person%20as%20in%20the%20reference%20photo" in purl2)
+
+# determinism: same prompt -> same seed -> same URL
+seen_p3 = []
+pp3 = PollinationsImageProvider(request_fn=_pollinations_ok(seen_p3))
+pp3.generate_scene("mist on the ridge")
+check("pollinations seed is deterministic on the prompt",
+      seen_p3[0][0] == seen_p[0][0])
+
+pcalls = {"n": 0}
+def _pollinations_flaky(url, headers):
+    pcalls["n"] += 1
+    if pcalls["n"] == 1:
+        raise _uerr.URLError("reset")
+    return 200, _fake_png(256)
+pp4 = PollinationsImageProvider(request_fn=_pollinations_flaky)
+check("pollinations transport failure retries once then succeeds",
+      len(pp4.generate_scene("x")) > 1000 and pcalls["n"] == 2)
+
+def _pollinations_limited(url, headers):
+    return 429, b'{"error": "rate limited"}'
+try:
+    PollinationsImageProvider(request_fn=_pollinations_limited).generate_scene("x")
+    check("pollinations 429 raises without retry", False)
+except ImageError as e:
+    check("pollinations 429 raises without retry", "429" in str(e))
+
+def _pollinations_err(url, headers):
+    return 200, b'{"error": "something broke"}'
+try:
+    PollinationsImageProvider(request_fn=_pollinations_err).generate_scene("x")
+    check("pollinations JSON-body 200 raises", False)
+except ImageError:
+    check("pollinations JSON-body 200 raises", True)
+
+# build_provider wiring
+check("build_provider('pollinations') -> PollinationsImageProvider",
+      isinstance(build_provider("pollinations"), PollinationsImageProvider))
+try:
+    build_provider("nope")
+    check("build_provider rejects unknown mode", False)
+except ImageError as e:
+    check("build_provider rejects unknown mode",
+          "pollinations" in str(e))
 
 print("\nimages demo: all green")

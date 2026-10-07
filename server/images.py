@@ -14,6 +14,9 @@ Mirrors the Phase 2 stub-then-real pattern:
     transport/5xx, reference-image support for the selfie.
   - `build_provider(mode, api_key)` — mode "real" raises until the key
     exists (loud refusal, same as config.py's ATFL_MURPH_NODE rule).
+    "pollinations" is the keyless Pollinations.ai backend (no account,
+    no key, no spend — the answer to the HF free-credits-zero problem,
+    2026-10-07).
 
 Secrecy shape: prompt builders take ONLY the filtered world view
 (turn_loop.filtered_view — physical state, never hidden_traits, never
@@ -32,6 +35,7 @@ import sqlite3
 import base64
 import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from typing import Protocol
@@ -179,11 +183,15 @@ class StubImageProvider:
 
 def build_provider(mode: str, api_key: str | None = None,
                    hf_token: str | None = None) -> ImageProvider:
-    """'off'/'stub'/'real'/'hf' from config. 'real'/'hf' refuse loudly
-    until their key exists — no silent stub generation against a live
-    account. 'real' is the paid Gemini direction (deprioritized per
-    2026-09-29 — Neil ruled out paid image APIs); 'hf' is the no-cost
-    HuggingFace Inference path (research/phase3-hf-colab-art.md)."""
+    """'off'/'stub'/'real'/'hf'/'pollinations' from config. 'real'/'hf'
+    refuse loudly until their key exists — no silent stub generation
+    against a live account. 'real' is the paid Gemini direction
+    (deprioritized per 2026-09-29 — Neil ruled out paid image APIs);
+    'hf' is the no-cost HuggingFace Inference path
+    (research/phase3-hf-colab-art.md), whose free $0.10/mo credit pool
+    hit zero on the game token (402, 2026-10-07); 'pollinations' is the
+    keyless Pollinations.ai backend (no account, no key, no spend —
+    the flip candidate now awaiting Neil's call)."""
     mode = (mode or "off").strip().lower()
     if mode == "off":
         return None
@@ -203,8 +211,11 @@ def build_provider(mode: str, api_key: str | None = None,
                 "(research/phase3-hf-colab-art.md); refusing to run "
                 "without it.")
         return HFImageProvider(hf_token)
-    raise ImageError(f"ATFL_IMAGES must be 'off', 'stub', 'real' or 'hf', "
-                     f"got {mode!r}")
+    if mode == "pollinations":
+        # Keyless by design: no token to require, no secret to leak.
+        return PollinationsImageProvider()
+    raise ImageError(f"ATFL_IMAGES must be 'off', 'stub', 'real', 'hf' "
+                     f"or 'pollinations', got {mode!r}")
 
 
 # -- Gemini REST provider --------------------------------------------------------
@@ -513,6 +524,134 @@ class HFImageProvider:
             except Exception as e:
                 raise ImageError(
                     f"hf image payload not decodable: {e}") from e
+        raise last
+
+
+# -- Pollinations.ai provider ---------------------------------------------------
+
+# Keyless text-to-image over a plain GET (APIDOCS: pollinations/pollinations
+# APIDOCS.md). Verified live 2026-10-07 from the sandbox (GET
+# image.pollinations.ai/prompt/{q}?width=256&height=256&seed=4242&nologo=true&private=true
+# -> 200 image/jpeg, ~5.5s) after the HF token's $0.10/mo included credits
+# hit zero (402) — the no-cost alternative that needs no account, no key,
+# no spend. `flux` is the default model per the docs; the `private=true`
+# param keeps generations out of Pollinations' public feed.
+# Caveats, read before flipping ATFL_IMAGES=pollinations: community-run
+# service, no SLA and unpublished anonymous rate limits (~1 req/15s per
+# one skill doc — fine for ~1 turn/day); generation quality varies by
+# model (the smoke returned sana-tagged bytes); nologo=true is honored per
+# most reports but at least one doc says it needs a free account — a
+# watermark on game art is acceptable, not a bug.
+POLLINATIONS_BASE = "https://image.pollinations.ai/prompt/"
+POLLINATIONS_MODEL = "flux"
+
+
+class PollinationsImageProvider:
+    """Keyless backend: Pollinations.ai, GET with the prompt in the path.
+
+    - stdlib-only (urllib) — no new deploy dependency, same as the
+      Gemini/HF adapters.
+    - No key at all: nothing in a header, nothing in the URL. The
+      prompt is the only user-controlled data and it travels in the
+      URL path (inherent to the API) — prompts are filtered world
+      state only (images.py module docstring), never hidden_traits.
+    - `seed` is deterministic on the prompt (sha1 mod 2**31): a retry
+      lands on the same image, and the archive stays reproducible
+      from the recorded prompts.
+    - Failure policy (established contract): 60s timeout + one retry on
+      transport failures and 5xx; 429 is NOT retried (degrade to
+      text-only immediately). Any other non-200 surfaces loudly as
+      ImageError. A 200 that is not decodable image bytes is also a
+      loud ImageError — the endpoint can answer with JSON errors.
+    - `character_ref`: Pollinations has a `kontext` image-to-image
+      model but its contract is unverified here, so selfies are plain
+      text-to-image with the instruction prefix (same reservation the
+      HF provider carries); character_ref is accepted for protocol
+      compatibility but unused.
+    - `request_fn(url, headers) -> (status, raw_bytes)` is injectable
+      so the demo pins the REST contract without network.
+    """
+
+    def __init__(self, *, model=POLLINATIONS_MODEL, timeout=60,
+                 request_fn=None):
+        self._model = model
+        self._timeout = timeout
+        self._request_fn = request_fn or self._urllib_get
+
+    # -- ImageProvider protocol --
+
+    def generate_scene(self, prompt: str, *, size: int = 1024) -> bytes:
+        return self._generate(prompt, size=size)
+
+    def generate_selfie(self, prompt: str, *, character_ref: bytes,
+                        size: int = 1024) -> bytes:
+        instruction = ("Keep the SAME person as in the reference photo "
+                       "(same face, same hiker, same look); " + prompt)
+        # character_ref reserved (see class docstring): plain
+        # text-to-image with the instruction prompt only.
+        return self._generate(instruction, size=size)
+
+    # -- REST plumbing --
+
+    @staticmethod
+    def _seed_for(prompt: str) -> int:
+        return int(hashlib.sha1(prompt.encode()).hexdigest(), 16) % 2**31
+
+    def _url_for(self, prompt: str, *, size: int) -> str:
+        params = urllib.parse.urlencode({
+            "width": size,
+            "height": size,
+            "model": self._model,
+            "seed": self._seed_for(prompt),
+            "nologo": "true",
+            "private": "true",
+        })
+        return POLLINATIONS_BASE + urllib.parse.quote(prompt, safe="") \
+            + "?" + params
+
+    def _urllib_get(self, url, headers):
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
+
+    def _generate(self, prompt: str, *, size: int) -> bytes:
+        url = self._url_for(prompt, size=size)
+        headers = {"User-Agent": "atfl/1.0 (game-art; +no-account)"}
+
+        last = None
+        for attempt in (1, 2):
+            try:
+                status, raw = self._request_fn(url, headers)
+            except (urllib.error.URLError, socket.timeout, TimeoutError,
+                    OSError) as e:
+                last = ImageError(
+                    f"pollinations transport failed "
+                    f"(attempt {attempt}/2): {e}")
+                continue  # one retry on transport failure
+            if status == 429:
+                # Rate limit: do NOT retry — degrade to text-only
+                # immediately (failure policy, images.py docstring).
+                raise ImageError(
+                    "pollinations rate-limited (429); no retry this "
+                    "turn — text-only turn goes out.")
+            if 500 <= status < 600:
+                last = ImageError(
+                    f"pollinations server error {status} "
+                    f"(attempt {attempt}/2)")
+                continue  # one retry on 5xx
+            if status != 200:
+                raise ImageError(
+                    f"pollinations rejected the request ({status}): "
+                    f"{raw[:200]!r}")
+            try:
+                return _to_jpeg(raw)
+            except Exception as e:
+                raise ImageError(
+                    f"pollinations payload not decodable as an image: "
+                    f"{e}; first bytes: {raw[:120]!r}") from e
         raise last
 
 

@@ -29,12 +29,16 @@ the free-micro-1 layout; override with env vars locally.
                         R4T fogline-gm roster through server/gm.py RosterGM;
                         needs the roster live on the host (phase 4). Values
                         other than 'mock'/'roster' raise.
-    ATFL_IMAGES         'off' (default), 'stub', 'real' or 'hf'. 'stub' wires the
-                        deterministic placeholder provider into turn emails;
-                        'real' raises until the image API key exists;
-                        'hf' raises until ATFL_HF_TOKEN exists — the no-cost
-                        HuggingFace Inference path (recommended,
-                        research/phase3-hf-colab-art.md).
+    ATFL_IMAGES         'off' (default), 'stub', 'real', 'hf' or
+                        'pollinations'. 'stub' wires the deterministic
+                        placeholder provider into turn emails; 'real' raises
+                        until the image API key exists; 'hf' raises until
+                        ATFL_HF_TOKEN exists — the no-cost HuggingFace
+                        Inference path (research/phase3-hf-colab-art.md),
+                        whose free $0.10/mo credit pool hit zero on the game
+                        token (402, 2026-10-07); 'pollinations' is the keyless
+                        Pollinations.ai backend (no account, no key, no
+                        spend — the flip candidate now awaiting Neil's call).
     ATFL_COMPOSITE       'v1' (default) or 'v2'. 'v1' = three-panel composite
                         (scene, code-drawn map, selfie). 'v2' = single image:
                         scene with the SVG map rasterized into the bottom-left
@@ -95,10 +99,10 @@ def load(env=os.environ):
         raise ConfigError("ATFL_TURN_LEN_MIN must be a positive integer (minutes).")
 
     images_mode = env.get("ATFL_IMAGES", "off").strip().lower()
-    if images_mode not in ("off", "stub", "real", "hf"):
+    if images_mode not in ("off", "stub", "real", "hf", "pollinations"):
         raise ConfigError(
-            f"ATFL_IMAGES must be 'off', 'stub', 'real' or 'hf', "
-            f"got {images_mode!r}")
+            f"ATFL_IMAGES must be 'off', 'stub', 'real', 'hf' or "
+            f"'pollinations', got {images_mode!r}")
 
     composite = env.get("ATFL_COMPOSITE", "v1").strip().lower()
     if composite not in ("v1", "v2"):
