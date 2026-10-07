@@ -36,17 +36,17 @@ def seed(db, guid, player_email):
         (guid, player_email, SCENARIO_ID, None, "active", 0, 0, now, None),
     )
     for slug, name, desc, phys, disc in [
-        ("trailhead", "Trail above the fog line",
+        ("trailhead", "Trailhead",
          "A narrow trail cresting a ridge. Below, an ocean of fog stretches to the horizon.",
          {"fog_density_local": 0.0, "fog_below": True, "light": "morning",
           "temp_c": 8, "wind": "light", "ground": "damp gravel", "trail_empty": True}, 1),
-        ("trail-down", "The trail descends toward the fog.",
+        ("trail-down", "Descent",
          "One steep descent drops straight toward the fog.",
          {"fog_density": 0.4, "light": "morning"}, 0),
-        ("trail-up", "Switchbacks climb the ridge, away from the fog.",
+        ("trail-up", "Switchbacks",
          "Switchbacks climb behind you, away from the fog.",
          {"fog_density": 0.0, "light": "morning"}, 0),
-        ("fog-below", "The ocean of fog below the ridge.",
+        ("fog-below", "Fog",
          "The fog ocean below the ridge — visible, never entered.",
          {"fog_density": 1.0}, 0),
     ]:

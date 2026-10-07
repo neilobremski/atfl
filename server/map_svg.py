@@ -100,8 +100,9 @@ def _esc(s):
 
 # Map presentation labels (Neil's 2026-10-04 direction: the map's labels
 # are short — "YOU" + interesting points only. The map orients the player;
-# it does not describe. The seed's sentence-length names stay the places'
-# prose identity; this table is the map's label layer, not a rename.)
+# it does not describe. Neil's 2026-10-07 verdict made the seed's place
+# names short too, so this table mirrors the seed; it stays the map's
+# label layer, not a rename.)
 SHORT_LABELS = {
     "trailhead": "Trailhead",
     "trail-down": "Descent",

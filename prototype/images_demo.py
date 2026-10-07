@@ -104,7 +104,7 @@ db.execute("UPDATE games SET plot_concept='the earth changing' WHERE guid=?",
 view = filtered_view(db, guid)
 sp, fp = scene_prompt(view, "dusk"), selfie_prompt(view, "dusk")
 check("scene prompt names the current place",
-      "Trail above the fog line" in sp)
+      "Trailhead" in sp)
 check("scene prompt has the time-of-day word", "dusk" in sp)
 check("scene prompt excludes hidden_traits values",
       "unexplained" not in sp.lower())
@@ -153,7 +153,7 @@ check("prompts reproducible via hash",
 
 # --- 6. stitch_composite unit ---
 from server.map_panel import render_map
-map_img = render_map({"trailhead": "Trail above the fog line"}, [], "trailhead",
+map_img = render_map({"trailhead": "Trailhead"}, [], "trailhead",
                      "dusk", size=256)
 stitched = stitch_composite(Image.open(io.BytesIO(a1)), map_img,
                             Image.open(io.BytesIO(b1)), size=256)

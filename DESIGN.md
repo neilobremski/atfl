@@ -213,7 +213,7 @@ assigned per signup; §1.1.)
 
 **places**
 
-1. `trailhead` — "Trail above the fog line" — *discovered=1,
+1. `trailhead` — "Trailhead" — *discovered=1,
    last_visited_turn=0*
    - physical_state: `{fog_density_local: 0.0, fog_below: true,
      light: "morning", temp_c: 8, wind: "light", ground: "damp gravel",
@@ -221,14 +221,14 @@ assigned per signup; §1.1.)
      fog is *below*, visible but not present.
    - hidden_traits: `{}` — the GM seeds place secrets at plot pick (§4).
 
-2. `trail-down` — "The trail descends toward the fog." — *discovered=0*
+2. `trail-down` — "Descent" — *discovered=0*
    - physical: `{fog_density: 0.4, light: "morning"}`; hidden: `{}`.
 
-3. `trail-up` — "Switchbacks climb the ridge, away from the fog." —
+3. `trail-up` — "Switchbacks" —
    *discovered=0* — physical: `{fog_density: 0.0, light: "morning"}`;
    hidden: `{}`.
 
-4. `fog-below` — "The ocean of fog below the ridge." — *discovered=0*
+4. `fog-below` — "Fog" — *discovered=0*
    (visible from the trailhead, never entered) —
    physical: `{fog_density: 1.0}`; hidden: `{}`.
 
