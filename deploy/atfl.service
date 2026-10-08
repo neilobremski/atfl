@@ -33,7 +33,7 @@ RestartPreventExitStatus=2
 # including the checkout at /srv/atfl/atfl — stays read-only.
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/atfl /srv/atfl/a8s
+ReadWritePaths=/var/lib/atfl /srv/atfl/a8s /srv/atfl/.config/a8s
 ProtectHome=true
 PrivateTmp=true
 

@@ -538,21 +538,53 @@ class RosterGM(GameMaster):
         a fast history read; `_call` re-arms every poll_interval_s until
         the reply wait deadline. Python-side sender + timestamp filtering
         is the first correlation pass — `--from` is belt only; the
-        per-call reply-shape gate in `_wait` is the second."""
+        per-call reply-shape gate in `_wait` is the second.
+
+        2026-10-07: `a8s convo` reads the same DB this method now reads
+        directly; under the atfl.service sandbox the CLI could not open
+        it, so the read moved into this process.
+        2026-10-08: two live-caught defects in the 10-07 port — (1) the
+        atfl.service unit's ProtectSystem=strict hid the DB outside its
+        ReadWritePaths (deploy/atfl.service now lists
+        /srv/atfl/.config/a8s), and (2) the rebuilt lines omitted "from",
+        so _parse_tells' sender filter dropped every row and the poll
+        always returned []. Both fixed here."""
         if not self.node_root or not os.path.isdir(self.node_root):
             _turn_failed(
                 "RosterGM node_root is not set — register the game "
                 "server's mailbox-only a8s node (e.g. atfl-server) and "
                 "point RosterGM at its root directory")
-        proc = subprocess.run(
-            [_a8s_bin(), "convo", self.node_name,
-             "--from", self.keeper_sender, "--json", "--limit", "25"],
-            capture_output=True, text=True, timeout=timeout_s + 30,
-            cwd=self.node_root)
-        if proc.returncode != 0:
-            _turn_failed(f"a8s convo exited {proc.returncode}: "
-                         f"{proc.stderr.strip()[:200]}")
-        return self._parse_tells(proc.stdout, since_iso)
+        # Direct DB read: the a8s daemon's conversations DB lives under
+        # the service user's ~/.config/a8s (same DB `a8s convo` reads).
+        import sqlite3 as _sqlite3
+        import json as _json
+        _db = os.path.expanduser("~/.config/a8s/conversations.sqlite3")
+        try:
+            _conn = _sqlite3.connect(f"file:{_db}?mode=ro", uri=True, timeout=10)
+            _rows = _conn.execute(
+                "SELECT entry_json FROM messages ORDER BY seq DESC LIMIT 200"
+            ).fetchall()
+            _conn.close()
+        except Exception as _e:
+            _turn_failed(f"direct DB read failed: {_e}")
+        # Filter by sender and format for _parse_tells. The "from" key
+        # is load-bearing: _parse_tells re-filters on it, so omitting it
+        # silences every reply (live-caught 2026-10-08).
+        _lines = []
+        for (_ej,) in _rows:
+            try:
+                _d = _json.loads(_ej)
+            except Exception:
+                continue
+            if _d.get("from") == self.keeper_sender:
+                _lines.append(_json.dumps(
+                    {"from": _d.get("from", ""),
+                     "content": _d.get("content", ""),
+                     "utc": _d.get("date", "")}))
+            if len(_lines) >= 25:
+                break
+        # Oldest first per the contract above (the SELECT is newest-first).
+        return sorted(self._parse_tells("\n".join(_lines), since_iso))
 
     def _parse_tells(self, output, since_iso):
         """Pull keeper reply rows out of `a8s convo --json`:
