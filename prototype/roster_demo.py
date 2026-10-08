@@ -35,7 +35,10 @@ from server.gm import (ENVELOPE_KEYS, MAX_NARRATIVE_WORDS, RosterGM,
 from server.turn_loop import TurnFailed
 import server.gm as gm_mod
 
-BASE = {"ATFL_GAME_ADDRESS": "fogline@game.example"}
+# Relay edition (2026-10-02): ATFL_GAME_ADDRESS retired — the player-facing
+# address is Murph's operational detail. ATFL_A8S_NODE_ROOT is required
+# unconditionally (a half-wired send path must fail at boot, not mid-turn).
+BASE = {"ATFL_A8S_NODE_ROOT": "/srv/atfl/a8s/atfl-server"}
 
 checks = []
 
@@ -290,22 +293,22 @@ check("leaked plot concept -> failed outcome, nothing sent", o.action == "failed
 print("\n== 9. config: roster backend selectable, mock stays default ==")
 cfg = config_load(dict(BASE))
 check("default GM backend is mock", cfg["gm"] == "mock")
-cfg = config_load({**BASE, "ATFL_GM": "roster",
-                   "ATFL_A8S_NODE_ROOT": "/srv/atfl/a8s/atfl-server"})
+cfg = config_load({**BASE, "ATFL_GM": "roster"})
 check("ATFL_GM=roster loads", cfg["gm"] == "roster")
 check("roster config carries node name + root",
       cfg["a8s_node"] == "atfl-server"
       and cfg["a8s_node_root"] == "/srv/atfl/a8s/atfl-server")
+no_root = {k: v for k, v in BASE.items() if k != "ATFL_A8S_NODE_ROOT"}
 try:
-    config_load({**BASE, "ATFL_GM": "roster"})  # no node root
+    config_load({**no_root, "ATFL_GM": "roster"})  # no node root
     refused = False
 except ConfigError:
     refused = True
-check("ATFL_GM=roster without node root refused at startup", refused)
+check("any config without node root refused at startup (roster included)",
+      refused)
 for bad in ("real", "bogus", "ROSTER "):
     try:
-        config_load({**BASE, "ATFL_GM": bad,
-                     "ATFL_A8S_NODE_ROOT": "/x"})
+        config_load({**BASE, "ATFL_GM": bad})
         refused = False
     except ConfigError:
         refused = True

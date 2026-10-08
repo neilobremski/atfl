@@ -1,9 +1,12 @@
-"""Deployment-shape smoke test — server/config.py + server/poll.py.
+"""Deployment-shape smoke test — server/config.py + server/poll.py
+(relay edition, 2026-10-02).
 
-Runs poll.run_once against FakeGmail + MockGM in a temp games dir with
-ATFL_GAME_ADDRESS set, plus the config failure modes. Also pins the
-deploy/atfl.service unit's structural invariants and, where available,
-runs systemd-analyze verify against it. No network, no token, nothing
+Runs poll.run_once against the FakeGmail relay stand-in + MockGM in a
+temp games dir with ATFL_A8S_NODE_ROOT set (ATFL_GAME_ADDRESS is
+retired — the player-facing address is Murph's operational detail),
+plus the config failure modes. Also pins the deploy/atfl.service
+unit's structural invariants and, where available, runs
+systemd-analyze verify against it. No network, no token, nothing
 durable. Everything must stay green.
 """
 import configparser
@@ -19,6 +22,10 @@ from server import config, poll
 from server.gm import MockGM
 from server.mailer import FakeGmail
 
+NODE_ROOT = tempfile.mkdtemp(prefix="atfl-node-")
+ENGINE_NODE = "atfl-server"
+MURPH_NODE = "murph"
+
 checks = []
 
 
@@ -30,64 +37,81 @@ def check(name, cond):
 # --- config validation ---
 def cfg(**kw):
     env = dict(os.environ)
-    env.pop("ATFL_GAME_ADDRESS", None)
+    env.pop("ATFL_A8S_NODE_ROOT", None)
     env.update(kw)
     return env
 
 try:
     config.load(cfg())
-    check("config refuses missing ATFL_GAME_ADDRESS", False)
+    check("config refuses missing ATFL_A8S_NODE_ROOT", False)
 except config.ConfigError:
-    check("config refuses missing ATFL_GAME_ADDRESS", True)
+    check("config refuses missing ATFL_A8S_NODE_ROOT", True)
 
 try:
-    config.load(cfg(ATFL_GAME_ADDRESS="game@example.com", ATFL_GM="real"))
+    config.load(cfg(ATFL_A8S_NODE_ROOT=NODE_ROOT, ATFL_GM="real"))
     check("config refuses unknown ATFL_GM value 'real'", False)
 except config.ConfigError:
     check("config refuses unknown ATFL_GM value 'real'", True)
 
 try:
-    config.load(cfg(ATFL_GAME_ADDRESS="game@example.com", ATFL_POLL_MIN="0"))
+    config.load(cfg(ATFL_A8S_NODE_ROOT=NODE_ROOT, ATFL_POLL_MIN="0"))
     check("config refuses ATFL_POLL_MIN=0", False)
 except config.ConfigError:
     check("config refuses ATFL_POLL_MIN=0", True)
 
-c = config.load(cfg(ATFL_GAME_ADDRESS="game@example.com"))
+try:
+    config.load(cfg(ATFL_A8S_NODE_ROOT=NODE_ROOT, ATFL_MURPH_NODE="  "))
+    check("config refuses blank ATFL_MURPH_NODE", False)
+except config.ConfigError:
+    check("config refuses blank ATFL_MURPH_NODE", True)
+
+c = config.load(cfg(ATFL_A8S_NODE_ROOT=NODE_ROOT))
 check("config defaults: poll 5min, turn 60min, mock gm",
       c["poll_min"] == 5 and c["turn_len_min"] == 60 and c["gm"] == "mock")
 check("config defaults: games dir is the VM layout",
       c["games_dir"] == "/var/lib/atfl/games")
+check("config: relay routing keys present",
+      c["murph_node"] == "murph" and c["a8s_node"] == "atfl-server"
+      and c["a8s_node_root"] == NODE_ROOT)
 
-# --- poll run_once with FakeGmail ---
+# --- poll run_once with the relay stand-in ---
 with tempfile.TemporaryDirectory() as tmp:
     games_dir = os.path.join(tmp, "games")
-    c = config.load(cfg(ATFL_GAME_ADDRESS="game@example.com",
+    c = config.load(cfg(ATFL_A8S_NODE_ROOT=NODE_ROOT,
                         ATFL_GAMES_DIR=games_dir))
-    fake = FakeGmail(game_address="game@example.com")
+    fake = FakeGmail(murph_node=MURPH_NODE, engine_node=ENGINE_NODE)
     fake.queue_inbound(sender="player@example.com", subject="start",
-                       body="I start the game", header_message_id="<s1@x>")
+                       body="I start the game")
     result = poll.run_once(fake, MockGM(), c)
     check("run_once processes signup via poll entry point",
           len(result["sent"]) == 1)
     sent = result["sent"][0]
     check("signup produces turn_email",
           sent["action"] == "turn_email" and sent["turn_no"] == 1)
+    check("signup hands an envelope to the murph node",
+          sent["handoff"] is True)
+    env = fake.outbox[-1]["envelope"]
+    check("outbound envelope is an atfl_outbound for the player",
+          env["kind"] == "atfl_outbound" and env["to"] == "player@example.com"
+          and env["turn_no"] == 1)
     check("games dir auto-created by poll main path", os.path.isdir(games_dir))
     check("mailer.db (seen-set) lives in games dir",
           os.path.exists(os.path.join(games_dir, "mailer.db")))
 
     # a second cycle with the same inbound already processed: nothing new
-    fake2 = FakeGmail(game_address="game@example.com")
+    fake2 = FakeGmail(murph_node=MURPH_NODE, engine_node=ENGINE_NODE)
     result2 = poll.run_once(fake2, MockGM(), c)
     check("second cycle with nothing new sends nothing",
           result2["sent"] == [] and result2["outcomes"] == [])
 
-    # --once exits 0 in fake mode (exercises the real main() path)
-    sys.argv = ["poll", "--fake"]
+    # --fake exits 0 (exercises the real main() path)
     os.environ["ATFL_GAMES_DIR"] = games_dir
-    os.environ["ATFL_GAME_ADDRESS"] = "game@example.com"  # config.load reads real env
+    os.environ["ATFL_A8S_NODE_ROOT"] = NODE_ROOT
+    # config.load reads real env — relay-era FakeGmail needs no address
     rc = poll.main(["--fake"])
     check("poll.main(['--fake']) exits 0", rc == 0)
+    os.environ.pop("ATFL_GAMES_DIR", None)
+    os.environ.pop("ATFL_A8S_NODE_ROOT", None)
 
 # --- deploy/atfl.service unit pins (session #24, 2026-09-27) ---
 # systemd-analyze verify pass 2026-09-27: the unit parses cleanly — the only
@@ -132,13 +156,14 @@ check("unit: ExecStart is the venv python running the poll loop",
       svc.get("ExecStart", "").split()[:2] ==
       ["/srv/atfl/venv/bin/python", "-m"] and
       "server.poll" in svc.get("ExecStart", ""))
-# NOTE: the --fake smoke run above left ATFL_GAMES_DIR set in os.environ;
-# clear it so this asserts the shipped default, not the temp dir.
-os.environ.pop("ATFL_GAMES_DIR", None)
-c_default = config.load(cfg(ATFL_GAME_ADDRESS="game@example.com"))
-check("unit: ReadWritePaths covers the config-default games dir",
+# NOTE: the --fake smoke run above set ATFL_GAMES_DIR in os.environ; it
+# was popped after the run, so this asserts the shipped default.
+c_default = config.load(cfg(ATFL_A8S_NODE_ROOT=NODE_ROOT))
+rwp = (svc.get("ReadWritePaths") or "").split()
+check("unit: ReadWritePaths covers the config-default games dir "
+      "(+ the relay-era a8s node root)",
       c_default["games_dir"] == "/var/lib/atfl/games"
-      and svc.get("ReadWritePaths") == "/var/lib/atfl")
+      and "/var/lib/atfl" in rwp and "/srv/atfl/a8s" in rwp)
 check("unit: hardening directives pinned",
       svc.get("NoNewPrivileges") == "true"
       and svc.get("ProtectSystem") == "strict"
