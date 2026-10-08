@@ -256,6 +256,21 @@ def send_outbound(envelope, murph_node, node_root, a8s_bin=None,
     if envelope.get("kind") != OUTBOUND_KIND:
         raise A8STransportError(f"not an {OUTBOUND_KIND} envelope")
     wire = envelope_for_wire(envelope)
+    # 2026-10-07: Murph node retired (MCP cutover); the S3 tell to murph
+    # goes nowhere. Spool the envelope for Murph-side SSH pull instead.
+    import uuid as _uuid
+    _spool = "/var/lib/atfl/outbound-spool"
+    try:
+        os.makedirs(_spool, exist_ok=True)
+        _fn = os.path.join(_spool, "outbound-%s.json" % _uuid.uuid4().hex)
+        _tmp = _fn + ".tmp"
+        with open(_tmp, "w", encoding="utf-8") as _f:
+            _f.write(wire)
+        os.replace(_tmp, _fn)
+    except OSError as _e:
+        raise A8STransportError("outbound spool write failed: %s" % _e)
+    log.info("relay: spooled outbound to %s", _fn)
+    return True
     cmd = [a8s_bin or os.path.expanduser("~/.ar3/a8s"),
            "tell", murph_node, "-"]
     env = dict(os.environ)
