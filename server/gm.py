@@ -665,7 +665,16 @@ class RosterGM(GameMaster):
                 print(f"[RosterGM] skip reply {utc} ({len(body)} chars) "
                       f"waiting for {call}: wrong-shaped reply, "
                       f"cursor advanced")
-            # loop until the deadline; the cursor only moves forward
+            # loop until the deadline; the cursor only moves forward.
+            # 2026-10-08: _poll_real is a fast history read that ignores its
+            # timeout_s — without this sleep the loop spins at 100% CPU for
+            # the whole wait (measured ~47% of the box's single OCPU during
+            # turn 3). Sleep before re-arming; bounded by remaining so the
+            # deadline is still honored.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            time.sleep(min(self.poll_interval_s, remaining))
 
     def _pending_path(self, game_guid):
         """Path of the in-flight-call record for this game, or None when
