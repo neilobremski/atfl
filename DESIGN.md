@@ -101,6 +101,12 @@ in Phase 2):
    state change is a yes/no question with rationale. Approved effects land
    as `mutations` rows. Denied actions keep their `no` row (auditable) with
    rationale and an optional partial effect ("chips the bark instead").
+   Effect language: `physical_state.<key>` changes on any target, plus
+   `location_slug` on `actor:` targets for movement (2026-10-09 — the
+   roster could not record movement before this, freezing the map and
+   scene prompt). Place `discovered`/`last_visited_turn` are
+   engine-derived from the player's post-effects location, never
+   roster-written.
 3. **Narrative** — one `narrative` string on the `turns` row, composed from
    the approved mutations plus the catch-up line. Rendered per §5; must
    pass the secrecy check (§2.5.5).

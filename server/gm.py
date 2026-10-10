@@ -54,7 +54,11 @@ class GameMaster:
     def adjudicate(self, player_input, filtered, context=None):
         """Return a list of mutation-question dicts:
         {"q", "answer" ("yes"/"no"), "rationale", "effect" or None}.
-        effect: {"<etype>:<slug>": {"physical_state.<key>": new_value}}."""
+        effect: {"<etype>:<slug>": {"physical_state.<key>": new_value}}.
+        Movement is the one non-physical key: {"actor:<slug>":
+        {"location_slug": "<place-slug>"}} (the engine derives place
+        discovered/last_visited_turn from it — the roster never writes
+        those directly)."""
         raise NotImplementedError
 
     def compose_narrative(self, player_input, questions, filtered, catchup,
@@ -252,10 +256,22 @@ def _validate_questions(questions):
                 if etype not in ("place", "actor", "object") or not slug:
                     _turn_failed(
                         f"roster effect target not '<etype>:<slug>': {target!r}")
-                if not isinstance(changes, dict) or not all(
-                        k.startswith("physical_state.") for k in changes):
+                if not isinstance(changes, dict):
                     _turn_failed(
-                        f"roster effect changes must be physical_state.<key> dicts: {changes!r}"[:160])
+                        f"roster effect changes not a dict: {changes!r}"[:120])
+                for key in changes:
+                    allowed = key.startswith("physical_state.")
+                    # 2026-10-09: movement is a first-class effect — an
+                    # actor's location_slug may change (the engine derives
+                    # place discovered/last_visited_turn from it, so the
+                    # roster never writes those directly).
+                    if etype == "actor" and key == "location_slug":
+                        allowed = True
+                    if not allowed:
+                        _turn_failed(
+                            f"roster effect key {key!r} not allowed on "
+                            f"{target!r} (physical_state.<key>, plus "
+                            f"location_slug on actors)")
     return questions
 
 

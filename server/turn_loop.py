@@ -158,11 +158,36 @@ def apply_effect(db, turn_id, etype, slug, field, new_value, cause):
         raise TurnFailed(
             f"no {table} row for slug {slug!r}: GM targeted a nonexistent entity")
     row = dict(raw)
-    root, _, sub = field.partition(".")
-    state = json.loads(row[root])
-    old = state.get(sub)
-    state[sub] = new_value
-    db.execute(f"UPDATE {table} SET {root}=? WHERE id=?", (_j(state), row["id"]))
+    if "." in field:
+        # JSON-subkey write inside a JSON column (physical_state.<key>).
+        root, _, sub = field.partition(".")
+        if root not in row:
+            raise TurnFailed(
+                f"no column {root!r} on {table} for effect field {field!r}")
+        state = json.loads(row[root])
+        old = state.get(sub)
+        state[sub] = new_value
+        db.execute(f"UPDATE {table} SET {root}=? WHERE id=?",
+                   (_j(state), row["id"]))
+    else:
+        # Scalar-column write — the ONLY one the effect language allows
+        # is actor.location_slug (movement, 2026-10-09). Whitelisted, not
+        # just column-checked, so a scalar field can never land in a JSON
+        # column (e.g. hidden_traits) and corrupt it.
+        if not (etype == "actor" and field == "location_slug"):
+            raise TurnFailed(
+                f"scalar effect field {field!r} not allowed on {table}")
+        # Referential guard, same spirit as the hallucinated-entity
+        # defense above: the destination must be a real place, or the
+        # world would point at nothing.
+        dest = db.execute("SELECT 1 FROM places WHERE slug=?",
+                          (new_value,)).fetchone()
+        if dest is None:
+            raise TurnFailed(
+                f"actor {slug!r} location_slug {new_value!r}: no such place")
+        old = row[field]
+        db.execute(f"UPDATE {table} SET {field}=? WHERE id=?",
+                   (new_value, row["id"]))
     _mutate(db, turn_id, etype, row["id"], field, old, new_value, cause)
 
 
@@ -307,7 +332,14 @@ def run_turn(db, player_input, gm, turn_len_min=60):
     # 4+5. advance time + update touched rows
     db.execute("UPDATE games SET turn_no=?, game_clock_min=? WHERE guid=?",
                (turn_no, clock_start + turn_len_min, g["guid"]))
-    db.execute("UPDATE places SET last_visited_turn=? WHERE slug='trailhead'", (turn_no,))
+    # 2026-10-09: movement bookkeeping is engine-derived, never
+    # roster-written. The player's post-effects location is discovered
+    # and last-visited this turn — this is what unfreezes the map and
+    # the scene prompt (both key off these columns).
+    player_loc = db.execute(
+        "SELECT location_slug FROM actors WHERE slug='player'").fetchone()[0]
+    db.execute("UPDATE places SET discovered=1, last_visited_turn=? "
+               "WHERE slug=?", (turn_no, player_loc))
     db.execute("UPDATE actors SET last_acted_turn=? WHERE slug='player'", (turn_no,))
 
     # death handling (§2.5.7): hp at or below zero ends the game, forever
