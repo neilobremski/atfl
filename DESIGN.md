@@ -120,6 +120,14 @@ Serial per game: at most one turn runs at a time. Inbound that arrives
 while a turn is running is queued and folded into the *next* turn's gather
 step (same rule as late replies: never dropped, never raced).
 
+Roster calls are send-then-wait (async A8S transport): each call waits up
+to 2h for the keeper's reply, then sends ONE re-prompt and waits 30min
+more before failing the turn loudly (TurnFailed). The wait is no longer
+silent — a "still waiting" heartbeat line fires every 10min naming the
+call/game/turn, elapsed, and remaining budget, and the re-prompt send and
+final failure print loud boundary lines (2026-10-09: a 2h silent wait
+looked identical to a dead roster in the journal).
+
 Player input extraction: `turns.player_input` is the email body minus the
 `Game code: <GUID>` footer line. Attachments are ignored in the MVP
 (logged, not acted on).

@@ -167,6 +167,15 @@ POLL_INTERVAL_S = 30
 # failing loudly via TurnFailed. None/0 disables the re-prompt.
 REPROMPT_WAIT_S = 1800
 
+# Wait heartbeat: the per-call wait is silent for up to 2.5h except
+# "skip reply" lines (2026-10-08: the engine sat inside one _wait with
+# no poll-cycle logs for ~2h while the roster was merely slow — the
+# operator could not tell "slow but working" from "dead roster"). Every
+# WAIT_HEARTBEAT_S of waiting, _wait prints one line naming the call,
+# game, turn, elapsed, and remaining budget. Grep the journal for
+# "still waiting" to watch a long wait live.
+WAIT_HEARTBEAT_S = 600
+
 # Publish wait: after `a8s tell` records the outbox file, _send_real waits
 # this long for the node's daemon to publish it (file drained from the
 # outbox dir into .receipts) BEFORE running `a8s stop`. `a8s tell` only
@@ -640,7 +649,8 @@ class RosterGM(GameMaster):
         except Exception as e:
             _turn_failed(f"roster send failed: {type(e).__name__}: {e}")
 
-    def _wait(self, sent_at, budget_s, accept=None, call="?"):
+    def _wait(self, sent_at, budget_s, accept=None, call="?", label=None,
+              heartbeat_s=WAIT_HEARTBEAT_S):
         """Poll until a keeper reply newer than sent_at arrives that passes
         the accept(body) shape gate, or the budget exhausts. Returns the
         reply body, or None on timeout (timeout is a soft signal here —
@@ -655,11 +665,20 @@ class RosterGM(GameMaster):
         Skipping by cursor (not by dropping) keeps a later correct reply
         reachable; a genuinely malformed reply still fails loudly in the
         call method's own validation, not here.
+
+        Every heartbeat_s of waiting prints one "still waiting" line so a
+        hours-long wait is observable in the journal (2026-10-08: 2h of
+        silence looked identical to a dead roster). label names the wait
+        (defaults to call); heartbeat_s=0/None disables the heartbeat.
         """
         from .turn_loop import TurnFailed  # lazy: turn_loop imports .gm
         accept = accept or (lambda body: True)
+        if label is None:
+            label = call
         cursor = sent_at
-        deadline = time.monotonic() + budget_s
+        start = time.monotonic()
+        deadline = start + budget_s
+        next_beat = start + heartbeat_s if heartbeat_s else None
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -681,6 +700,14 @@ class RosterGM(GameMaster):
                 print(f"[RosterGM] skip reply {utc} ({len(body)} chars) "
                       f"waiting for {call}: wrong-shaped reply, "
                       f"cursor advanced")
+            now = time.monotonic()
+            if next_beat is not None and now >= next_beat:
+                remaining = deadline - now
+                print(f"[RosterGM] still waiting: {label} — "
+                      f"{int(now - start)}s elapsed, "
+                      f"{int(max(remaining, 0))}s left on this "
+                      f"{int(budget_s)}s budget (sent at {sent_at})")
+                next_beat += heartbeat_s
             # loop until the deadline; the cursor only moves forward.
             # 2026-10-08: _poll_real is a fast history read that ignores its
             # timeout_s — without this sleep the loop spins at 100% CPU for
@@ -775,22 +802,29 @@ class RosterGM(GameMaster):
             reprompted = False
             self._write_pending(game_guid, call, turn_no, sent_at)
         accept = _REPLY_ACCEPT.get(call, lambda body: True)
-        body = self._wait(sent_at, self.reply_wait_s, accept, call)
+        label = (f"{call} game {game_guid[:8] or '?'} turn {turn_no}")
+        body = self._wait(sent_at, self.reply_wait_s, accept, call, label)
         if body is None and self.reprompt_wait_s and not reprompted:
             # One bounded re-prompt before the loud failure: the
             # starved return leg may already exist on the roster side
             # (session #37 — the artifact was produced but never sent).
+            print(f"[RosterGM] WAIT BUDGET EXHAUSTED: {label} — no keeper "
+                  f"reply within {self.reply_wait_s}s; sending one "
+                  f"re-prompt, waiting {self.reprompt_wait_s}s more")
             reprompt = build_reprompt_envelope(envelope)
             self._send(json.dumps(reprompt))
             self._write_pending(game_guid, call, turn_no, sent_at,
                                reprompted=True)
             # Keep the ORIGINAL sent_at: a late reply to the original
             # call arriving during the re-prompt wait is the reply.
-            body = self._wait(sent_at, self.reprompt_wait_s, accept, call)
+            body = self._wait(sent_at, self.reprompt_wait_s, accept, call,
+                              label)
         if body is None:
             budget = (f"{self.reply_wait_s}s"
                       + (f" + {self.reprompt_wait_s}s re-prompt"
                          if self.reprompt_wait_s and not reprompted else ""))
+            print(f"[RosterGM] CALL FAILED: {label} — no keeper reply "
+                  f"within {budget}; failing turn loudly")
             self._clear_pending(game_guid)
             _turn_failed(f"no roster reply within {budget} for {call}")
         self._clear_pending(game_guid)
