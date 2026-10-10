@@ -203,8 +203,11 @@ def _turn_composite(games_dir, outcome, images_cfg):
     images never fail a turn). Only turn emails get composites;
     clarify/nudge stay text-only.
 
-    images_cfg["composite"]: 'v1' (three-panel composite) or 'v2'
-    (single scene image + SVG map overlay, build_turn_composite_v2).
+    images_cfg["composite"]: 'v1' (three-panel composite), 'v2'
+    (single scene image + SVG map overlay, build_turn_composite_v2), or
+    'maponly' (full-size SVG map as JPEG, no scene generation —
+    build_turn_composite_maponly; 2026-10-10, scene images paused per
+    Neil's verdict that the landscapes are a concept mismatch).
     Defaults to 'v1'. Neil approved v2 on 2026-10-03 (single image) with
     the 2026-10-04 geometry (1024 scene, 170px overlay) — the flip rides
     on ATFL_COMPOSITE in the env.
@@ -213,12 +216,21 @@ def _turn_composite(games_dir, outcome, images_cfg):
             or outcome.action != "turn_email":
         return None, None
     composite_mode = (images_cfg.get("composite") or "v1").strip().lower()
-    if composite_mode not in ("v1", "v2"):
+    if composite_mode not in ("v1", "v2", "maponly"):
         return None, (f"images skipped (ATFL_COMPOSITE={composite_mode!r} "
-                       "not 'v1'/'v2')")
+                       "not 'v1'/'v2'/'maponly')")
     try:
         from .images import (build_provider, build_turn_composite,
-                             build_turn_composite_v2, ImageError)
+                             build_turn_composite_v2,
+                             build_turn_composite_maponly, ImageError)
+        if composite_mode == "maponly":
+            # No provider: the map is code-drawn from DB truth, so no
+            # image backend is needed and none is touched.
+            comp = build_turn_composite_maponly(games_dir, outcome.guid,
+                                                outcome.turn_no)
+            return (comp["jpeg"],
+                    f"map-only image attached ({comp['time_of_day']}, "
+                    f"{comp['map_px']}px, no scene generation)")
         provider = build_provider(images_cfg.get("mode"),
                                   api_key=images_cfg.get("api_key"),
                                   hf_token=images_cfg.get("hf_token"))
@@ -736,6 +748,28 @@ def selftest():
                                     {"mode": "stub", "composite": "v3"})
     _check("composite: bad mode -> (None, note), never raises",
            jpg_b is None and "ATFL_COMPOSITE" in note_b)
+    mdb0 = _open_game_db(tmp, vguid)
+    kinds_before = {r[0] for r in mdb0.execute(
+        "SELECT kind FROM assets WHERE turn_created=1")}
+    mdb0.close()
+    jpg_m, note_m = _turn_composite(tmp, out_t,
+                                    {"mode": "pollinations",
+                                     "composite": "maponly"})
+    _check("composite: maponly returns JPEG bytes, no provider needed",
+           jpg_m is not None and jpg_m[:3] == b"\xff\xd8\xff"
+           and note_m.startswith("map-only image attached")
+           and "no scene generation" in note_m)
+    import io as _io2
+    from PIL import Image as _Img2
+    _check("composite: maponly is 1024x1024",
+           _Img2.open(_io2.BytesIO(jpg_m)).size == (1024, 1024))
+    mdb = _open_game_db(tmp, vguid)
+    kinds_after = {r[0] for r in mdb.execute(
+        "SELECT kind FROM assets WHERE turn_created=1")}
+    mdb.close()
+    _check("composite: maponly adds only _maponly kinds (no scene assets)",
+           kinds_after - kinds_before
+           == {"map_svg_maponly", "composite_maponly"})
 
     # -- sweep_idle wiring (§2.3): the idle turn is the daily touch, the
     # standalone nudge is fallback-only. Found 2026-10-10: sweep_idle was

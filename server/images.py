@@ -925,3 +925,85 @@ def build_turn_composite_v2(games_dir, guid, turn_no, provider,
         "prompt_hash": hashlib.sha256(prompt_text.encode()).hexdigest()[:16],
         "sent_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# -- map-only turn render ------------------------------------------------------
+#
+# 2026-10-10 (Neil's verdict): generated scene images are PAUSED — the
+# broad landscapes don't reflect the narrative or the first-person feel
+# (concept mismatch, not a tuning problem). The map stays: text-keyed SVG
+# from DB truth, accurate in play (movement verified, turn 5). This builder
+# renders the map at full size and ships it as the turn's image with no
+# scene generation at all — no image provider is used (pass provider=None).
+#
+# WIRED 2026-10-10: mailer._turn_composite calls this builder when
+# images_cfg["composite"] == "maponly" (ATFL_COMPOSITE=maponly in config).
+# Asset kinds carry a "_maponly" suffix so draft runs never collide with
+# v1/v2 archive files.
+def build_turn_composite_maponly(games_dir, guid, turn_no,
+                                 size: int = COMPOSITE_V2_SIZE,
+                                 quality: int = COMPOSITE_JPEG_QUALITY) -> dict:
+    """Generate the turn's image: the SVG map rendered large, as JPEG.
+
+    Steps: DB state -> filtered view (+ game-clock time of day) ->
+    map as SVG at full design size (from DB truth, short labels, house
+    palette) -> rasterize at size -> JPEG -> persist bytes + provenance.
+
+    Returns {"jpeg": bytes, "time_of_day": str, "map_px": int,
+             "prompt_hash": str}. Raises ImageError on any failure —
+    the caller logs it and sends the text-only turn.
+    """
+    try:
+        db = sqlite3.connect(os.path.join(games_dir, f"{guid}.db"))
+        db.row_factory = sqlite3.Row
+        view = filtered_view(db, guid)
+        g = dict(db.execute("SELECT * FROM games WHERE guid=?", (guid,)).fetchone())
+        db.close()
+    except Exception as e:
+        raise ImageError(f"cannot read game state for images: {e}") from e
+    if not g:
+        raise ImageError(f"no game row for {guid}")
+
+    tod = time_of_day_word(g["game_clock_min"])
+
+    try:
+        player_loc = view["actors"]["player"]["location_slug"]
+        discovered = {s: p["name"] for s, p in view["places"].items()
+                      if p["discovered"]}
+        if not discovered:
+            raise ImageError("no discovered places — nothing to draw")
+        edges = [(a, b) for a, b in SCENARIO_EDGES
+                 if a in discovered and b in discovered]
+
+        svg_text = render_map_svg(discovered, edges, player_loc, tod,
+                                  size=size, palette=MAP_PALETTE)
+        map_png = rasterize_scaled(svg_text, size, size)
+    except (ImageError, MapSvgError):
+        raise
+    except Exception as e:
+        raise ImageError(f"maponly image generation failed: {e}") from e
+
+    try:
+        img = Image.open(io.BytesIO(map_png)).convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=quality)
+        jpeg = buf.getvalue()
+    except Exception as e:
+        raise ImageError(f"maponly JPEG encode failed: {e}") from e
+
+    # Provenance: svg + composite land in the assets table under _maponly
+    # suffixed kinds. The svg file keeps its .svg extension via ext.
+    prompt_text = (f"MAP ONLY: {size}px full-size map "
+                   f"({tod}; scene generation paused 2026-10-10)")
+    _store_asset(games_dir, guid, turn_no, "map_svg_maponly",
+                 svg_text.encode("utf-8"), prompt_text, ext="svg")
+    _store_asset(games_dir, guid, turn_no, "composite_maponly",
+                 jpeg, prompt_text)
+
+    return {
+        "jpeg": jpeg,
+        "time_of_day": tod,
+        "map_px": size,
+        "prompt_hash": hashlib.sha256(prompt_text.encode()).hexdigest()[:16],
+        "sent_at": datetime.now(timezone.utc).isoformat(),
+    }
