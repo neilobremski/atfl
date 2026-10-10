@@ -111,5 +111,7 @@ cfg = load({**BASE, "ATFL_GAMES_DIR": "/tmp/atfl-test",
 check("games-dir/composite overrides honored",
       cfg["games_dir"] == "/tmp/atfl-test" and cfg["composite"] == "v2")
 check("ATFL_COMPOSITE=bogus refused", raises({**BASE, "ATFL_COMPOSITE": "v3"}) is not None)
+check("ATFL_COMPOSITE=maponly honored",
+      load({**BASE, "ATFL_COMPOSITE": "maponly"})["composite"] == "maponly")
 
 print("\nconfig demo green — startup refuses every half-wired shape.")
