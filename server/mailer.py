@@ -341,7 +341,7 @@ def run_poll_cycle(games_dir, gm, engine_node, murph_node, node_root,
     file is NOT consumed, so the next cycle retries the same inbound
     (Murph's replay guard dedupes the turn if the first tell landed).
     Returns {"outcomes": [...], "sent": [...], "nudged": [...]}."""
-    from .dispatch import dispatch_batch  # local import: mailer is dispatch's client
+    from .dispatch import dispatch_batch, sweep_idle  # local import: mailer is dispatch's client
     relay = _relay if relay is None else relay
     seen = set() if seen_ids is None else seen_ids
     seen |= _load_seen(games_dir)
@@ -369,6 +369,22 @@ def run_poll_cycle(games_dir, gm, engine_node, murph_node, node_root,
         except Exception:
             pass  # seen-set covers it; the file just re-polls once
     _store_seen(games_dir, [m["id"] for m, _ in fresh])
+
+    # Idle sweep (§2.3): the daily touch. Runs AFTER inbound turns so a
+    # same-cycle player reply suppresses it (sweep_idle's gate keys off
+    # MAX(turns.created_at), which the reply's turn just refreshed), and
+    # BEFORE maybe_nudge: a handed-off idle turn refreshes last_email_at
+    # via _record_handoff, keeping the standalone nudge a true fallback
+    # (it fires only when no turn email went out in 24h — e.g. the idle
+    # turn failed twice and nothing was handed off).
+    for out in sweep_idle(games_dir, gm, turn_len_min=turn_len_min):
+        handed_off, img_note = send_outcome(
+            games_dir, out, None, murph_node, node_root, images=images,
+            relay=relay)
+        note = "; ".join(n for n in (out.note, img_note) if n) or None
+        sent.append({"sender": out.sender, "action": out.action,
+                     "guid": out.guid, "turn_no": out.turn_no,
+                     "handoff": handed_off, "note": note})
     return {"outcomes": outcomes, "sent": sent,
             "nudged": maybe_nudge(games_dir, murph_node, node_root,
                                   relay=relay)}
@@ -720,6 +736,91 @@ def selftest():
                                     {"mode": "stub", "composite": "v3"})
     _check("composite: bad mode -> (None, note), never raises",
            jpg_b is None and "ATFL_COMPOSITE" in note_b)
+
+    # -- sweep_idle wiring (§2.3): the idle turn is the daily touch, the
+    # standalone nudge is fallback-only. Found 2026-10-10: sweep_idle was
+    # defined and tested but never called by run_poll_cycle — only the
+    # nudge fallback ran, so a silent player got a system "are you there?"
+    # instead of the designed idle turn with catch-up lead.
+    import uuid as _uuid3
+    from .dispatch import sweep_idle as _sweep_idle
+    from .turn_loop import TurnFailed as _TurnFailed
+    iguid = str(_uuid3.uuid4())
+    idb = _schema.create_db(os.path.join(tmp, iguid + ".db"))
+    _seed(idb, iguid, "idleplayer@example.com")
+    idb.close()
+    irelay = FakeGmail()
+    irelay._next = 6000  # shared games_dir seen-set already holds ink-1000..
+    irelay.queue_inbound("idleplayer@example.com", "above the fog line",
+                         "I want to play")
+    ir1 = run_poll_cycle(tmp, MockGM(), "atfl-server", "murph", "/node/root",
+                         images={"mode": "off"}, relay=irelay)
+    _check("idle: signup turn hands off normally",
+           len(ir1["sent"]) == 1 and ir1["sent"][0]["action"] == "turn_email")
+    _check("idle: fresh game gets no idle turn",
+           _sweep_idle(tmp, MockGM(), interval_h=24) == [])
+    idb2 = _open_game_db(tmp, iguid)
+    stale = (datetime.now(timezone.utc)
+             - timedelta(hours=25)).isoformat()
+    idb2.execute("UPDATE turns SET created_at=? WHERE game_guid=?",
+                 (stale, iguid))
+    idb2.execute("UPDATE games SET last_email_at=? WHERE guid=?",
+                 (stale, iguid))
+    idb2.commit()
+    idb2.close()
+    ir2 = run_poll_cycle(tmp, MockGM(), "atfl-server", "murph", "/node/root",
+                         images={"mode": "off"}, relay=irelay)
+    idle_sent = [s for s in ir2["sent"] if s["action"] == "turn_email"]
+    idb3 = _open_game_db(tmp, iguid)
+    try:
+        last_input = idb3.execute(
+            "SELECT player_input FROM turns WHERE game_guid=? "
+            "ORDER BY turn_no DESC LIMIT 1", (iguid,)).fetchone()[0]
+    finally:
+        idb3.close()
+    _check("idle: stale game gets exactly one idle turn handed off",
+           len(idle_sent) == 1 and idle_sent[0]["handoff"] is True
+           and idle_sent[0]["turn_no"] == 2)
+    _check("idle: the idle turn's player_input is the sentinel",
+           last_input == "idle default")
+    _check("idle: nudge stays quiet after the idle handoff (fallback-only)",
+           ir2["nudged"] == [])
+
+    # fallback: when the idle turn fails twice, nothing is handed off and
+    # the standalone nudge fires — it is the fallback, not the default.
+    class _FailGM(MockGM):
+        def adjudicate(self, player_input, filtered, context=None):
+            raise _TurnFailed("drill failure")
+    fgid = str(_uuid3.uuid4())
+    fdb = _schema.create_db(os.path.join(tmp, fgid + ".db"))
+    _seed(fdb, fgid, "failplayer@example.com")
+    fdb.execute(
+        "INSERT INTO turns (game_guid, turn_no, game_time_start_min,"
+        " game_time_len_min, player_input, created_at)"
+        " VALUES (?,?,0,60,'hello',?)",
+        (fgid, 1, stale))
+    fdb.execute("UPDATE games SET last_email_at=?, status='active'"
+                " WHERE guid=?", (stale, fgid))
+    fdb.commit()
+    fdb.close()
+    fr = run_poll_cycle(tmp, _FailGM(), "atfl-server", "murph", "/node/root",
+                        images={"mode": "off"}, relay=FakeGmail())
+    _check("idle: failed idle turn -> 'failed' outcome, nothing handed off",
+           [s["action"] for s in fr["sent"]] == ["failed"]
+           and all(s["handoff"] is False for s in fr["sent"]))
+    _check("idle: nudge fires as the fallback when no turn email went out",
+           len(fr["nudged"]) == 1 and fr["nudged"][0]["guid"] == fgid)
+
+    # zero-turn games are failed signups, not idle games: the sweep never
+    # starts a game (the nudge path owns failed-signup UX, §2.3)
+    import tempfile as _tf
+    ztmp = _tf.mkdtemp(prefix="atfl-idle-zero-")
+    zguid = str(_uuid3.uuid4())
+    zdb = _schema.create_db(os.path.join(ztmp, zguid + ".db"))
+    _seed(zdb, zguid, "zeroplayer@example.com")
+    zdb.close()
+    _check("idle: zero-turn game gets no idle turn (interval_h=0)",
+           _sweep_idle(ztmp, MockGM(), interval_h=0) == [])
 
     print("\nmailer relay selftest: all checks green.")
 

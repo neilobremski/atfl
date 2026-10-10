@@ -411,7 +411,11 @@ def sweep_idle(games_dir, gm, interval_h=24, turn_len_min=60):
         db = _open_db(games_dir, guid)
         try:
             latest = db.execute("SELECT MAX(created_at) FROM turns").fetchone()[0]
-            if latest and latest >= cutoff:
+            if latest is None:
+                continue  # no turns yet: a failed signup, not an idle game —
+                          # the nudge path owns that UX (§2.3); the sweep
+                          # never starts a game
+            if latest >= cutoff:
                 continue
             with get_lock(guid):
                 outcomes.append(_turn_outcome(db, game["player_email"], gm,
