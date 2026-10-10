@@ -738,7 +738,11 @@ review. The build passes when every box holds.
       of the playtest — inspectable, exportable, no special tooling.
 - [ ] Known deferred items are still deferred: Phase 3 image pipeline
       (composite), Phase 4 actors/multiplayer, Phase 5 video — none
-      sneaked into the MVP.
+      sneaked into the MVP. (2026-10-10 note: the per-turn scene/map
+      composite already ships via Pollinations — treated as playtest
+      enrichment, not a Phase 3 pre-emption; Phase 3's scope,
+      time-of-day-aware composite + selfie + text-map fallback polish,
+      is unchanged. Neil's art feedback judges it, not this gate.)
 
 ### 6.5 Deferred (not §6's business)
 
