@@ -143,6 +143,13 @@ Player input extraction: `turns.player_input` is the email body minus the
   real time with **no turn email at all** (idle-turn pipeline down, or a
   scenario that disables idle turns). It advances nothing and mutates
   nothing; at most one per 24h per game.
+- (2026-10-10) Wiring gap found and fixed: `sweep_idle` was defined and
+  self-tested but never called by the poll cycle — only the nudge
+  fallback ran, so a silent player got the "are you there?" email
+  instead of the designed idle turn. `run_poll_cycle` now runs the idle
+  sweep after inbound turns and before the nudge sweep; the sweep never
+  starts a game (zero-turn/failed-signup games are skipped — the nudge
+  path owns that UX).
 
 ### 2.4 Nudge wording policy (structural — prose style is Neil's eye)
 Nudges and catch-ups carry constraints, not style (the prose itself is a
