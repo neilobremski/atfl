@@ -699,14 +699,15 @@ class RosterGM(GameMaster):
                     return body
                 print(f"[RosterGM] skip reply {utc} ({len(body)} chars) "
                       f"waiting for {call}: wrong-shaped reply, "
-                      f"cursor advanced")
+                      f"cursor advanced", flush=True)
             now = time.monotonic()
             if next_beat is not None and now >= next_beat:
                 remaining = deadline - now
                 print(f"[RosterGM] still waiting: {label} — "
                       f"{int(now - start)}s elapsed, "
                       f"{int(max(remaining, 0))}s left on this "
-                      f"{int(budget_s)}s budget (sent at {sent_at})")
+                      f"{int(budget_s)}s budget (sent at {sent_at})",
+                      flush=True)
                 next_beat += heartbeat_s
             # loop until the deadline; the cursor only moves forward.
             # 2026-10-08: _poll_real is a fast history read that ignores its
@@ -795,7 +796,8 @@ class RosterGM(GameMaster):
             sent_at = pending["sent_at"]
             reprompted = bool(pending.get("reprompted"))
             print(f"[RosterGM] resume {call} game {game_guid[:8]} turn "
-                  f"{turn_no}: re-attaching to send at {sent_at}, no re-send")
+                  f"{turn_no}: re-attaching to send at {sent_at}, no re-send",
+                  flush=True)
         else:
             self._send(json.dumps(envelope))
             sent_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -810,7 +812,8 @@ class RosterGM(GameMaster):
             # (session #37 — the artifact was produced but never sent).
             print(f"[RosterGM] WAIT BUDGET EXHAUSTED: {label} — no keeper "
                   f"reply within {self.reply_wait_s}s; sending one "
-                  f"re-prompt, waiting {self.reprompt_wait_s}s more")
+                  f"re-prompt, waiting {self.reprompt_wait_s}s more",
+                  flush=True)
             reprompt = build_reprompt_envelope(envelope)
             self._send(json.dumps(reprompt))
             self._write_pending(game_guid, call, turn_no, sent_at,
@@ -824,7 +827,7 @@ class RosterGM(GameMaster):
                       + (f" + {self.reprompt_wait_s}s re-prompt"
                          if self.reprompt_wait_s and not reprompted else ""))
             print(f"[RosterGM] CALL FAILED: {label} — no keeper reply "
-                  f"within {budget}; failing turn loudly")
+                  f"within {budget}; failing turn loudly", flush=True)
             self._clear_pending(game_guid)
             _turn_failed(f"no roster reply within {budget} for {call}")
         self._clear_pending(game_guid)

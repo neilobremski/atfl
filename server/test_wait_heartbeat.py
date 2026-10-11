@@ -107,6 +107,46 @@ check("original send + one re-prompt", len(sends) == 2,
 # 5. Sanity: the module default is 600s.
 check("WAIT_HEARTBEAT_S == 600", WAIT_HEARTBEAT_S == 600)
 
+# 6. Field-shape test (2026-10-10): the 2026-10-08 fix deployed but its
+# heartbeat never reached the journal during turn 6's 42-min adjudicate
+# wait — print() to a systemd pipe is block-buffered, so the beats sat in
+# the buffer until process exit. The heartbeat must be visible on a
+# block-buffered pipe BEFORE the process exits. This check runs _wait in
+# a subprocess with stdout=PIPE and reads the first beat without waiting
+# for exit (the pre-fix form passes checks 1-5 and fails this one).
+import subprocess as _sp
+import time as _time
+_child = (
+    "import sys, time; sys.path.insert(0, %r); "
+    "from server.gm import RosterGM; "
+    "gm = RosterGM(send_fn=lambda env: None, "
+    "poll_fn=lambda t, s: [], poll_interval_s=0.05); "
+    "gm._wait('2026-10-10T06:00:00Z', 3.0, None, 'adjudicate', "
+    "label='pipe-test', heartbeat_s=0.2)"
+    % os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+_p = _sp.Popen([sys.executable, "-c", _child], stdout=_sp.PIPE,
+               stderr=_sp.DEVNULL, text=True)
+_got_beat = False
+try:
+    import select as _sel
+    _buf = ""
+    _deadline = _time.time() + 2.5
+    while _time.time() < _deadline:
+        r, _, _ = _sel.select([_p.stdout], [], [], 0.2)
+        if r:
+            _chunk = _p.stdout.read1(4096) if hasattr(_p.stdout, "read1") else _p.stdout.read(4096)
+            if not _chunk:
+                break
+            _buf += _chunk
+            if "still waiting" in _buf:
+                _got_beat = True
+                break
+finally:
+    _p.kill()
+check("heartbeat visible on a block-buffered pipe before exit", _got_beat,
+      "beats stuck in stdout buffer — add flush=True to the print")
+
 if FAILS:
     print(f"\n{len(FAILS)} FAILURE(S)")
     sys.exit(1)
