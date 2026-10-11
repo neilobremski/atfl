@@ -204,7 +204,10 @@ def _turn_composite(games_dir, outcome, images_cfg):
     clarify/nudge stay text-only.
 
     images_cfg["composite"]: 'v1' (three-panel composite), 'v2'
-    (single scene image + SVG map overlay, build_turn_composite_v2), or
+    (single scene image + SVG map overlay, build_turn_composite_v2), 'pov'
+    (same geometry as v2 but the scene is a first-person headcam shot —
+    build_turn_composite_pov; implemented 2026-10-10 per the POV proof,
+    NOT deployed until Neil approves the first-person art direction), or
     'maponly' (full-size SVG map as JPEG, no scene generation —
     build_turn_composite_maponly; 2026-10-10, scene images paused per
     Neil's verdict that the landscapes are a concept mismatch).
@@ -216,12 +219,13 @@ def _turn_composite(games_dir, outcome, images_cfg):
             or outcome.action != "turn_email":
         return None, None
     composite_mode = (images_cfg.get("composite") or "v1").strip().lower()
-    if composite_mode not in ("v1", "v2", "maponly"):
+    if composite_mode not in ("v1", "v2", "pov", "maponly"):
         return None, (f"images skipped (ATFL_COMPOSITE={composite_mode!r} "
-                       "not 'v1'/'v2'/'maponly')")
+                       "not 'v1'/'v2'/'pov'/'maponly')")
     try:
         from .images import (build_provider, build_turn_composite,
                              build_turn_composite_v2,
+                             build_turn_composite_pov,
                              build_turn_composite_maponly, ImageError)
         if composite_mode == "maponly":
             # No provider: the map is code-drawn from DB truth, so no
@@ -241,6 +245,12 @@ def _turn_composite(games_dir, outcome, images_cfg):
                                            outcome.turn_no, provider)
             return (comp["jpeg"],
                     f"single image attached ({comp['time_of_day']}, "
+                    f"map overlay {comp['overlay_px']}px)")
+        if composite_mode == "pov":
+            comp = build_turn_composite_pov(games_dir, outcome.guid,
+                                            outcome.turn_no, provider)
+            return (comp["jpeg"],
+                    f"POV image attached ({comp['time_of_day']}, "
                     f"map overlay {comp['overlay_px']}px)")
         comp = build_turn_composite(games_dir, outcome.guid,
                                     outcome.turn_no, provider)
@@ -770,6 +780,57 @@ def selftest():
     _check("composite: maponly adds only _maponly kinds (no scene assets)",
            kinds_after - kinds_before
            == {"map_svg_maponly", "composite_maponly"})
+
+    # -- composite: pov (first-person art direction, 2026-10-10 POV proof).
+    # Implemented behind the flag; NOT deployed — the env keeps
+    # ATFL_COMPOSITE=maponly until Neil approves the art direction.
+    mdb_p0 = _open_game_db(tmp, vguid)
+    kinds_pov_pre = {r[0] for r in mdb_p0.execute(
+        "SELECT kind FROM assets WHERE turn_created=1")}
+    mdb_p0.close()
+    jpg_p, note_p = _turn_composite(tmp, out_t,
+                                    {"mode": "stub", "composite": "pov"})
+    _check("composite: pov returns JPEG bytes via the stub provider",
+           jpg_p is not None and jpg_p[:3] == b"\xff\xd8\xff"
+           and note_p.startswith("POV image attached")
+           and "map overlay" in note_p)
+    _check("composite: pov is 1024x1024",
+           _Img2.open(_io2.BytesIO(jpg_p)).size == (1024, 1024))
+    mdb_p1 = _open_game_db(tmp, vguid)
+    kinds_pov_post = {r[0] for r in mdb_p1.execute(
+        "SELECT kind FROM assets WHERE turn_created=1")}
+    mdb_p1.close()
+    _check("composite: pov adds only _pov kinds (no v1/v2 assets)",
+           kinds_pov_post - kinds_pov_pre
+           == {"scene_pov", "map_svg_pov", "composite_pov"})
+    from .images import (scene_prompt_pov as _scene_prompt_pov,
+                         filtered_view as _filtered_view)
+    pdb = _open_game_db(tmp, vguid)
+    pview = _filtered_view(pdb, vguid)
+    pdb.close()
+    psp = _scene_prompt_pov(pview, "midday")
+    _check("composite: pov scene prompt is headcam framing, not cinematic",
+           psp.startswith("Headcam still photograph")
+           and "Cinematic" not in psp
+           and "Trailhead" in psp and "midday" in psp
+           and "No other people anywhere in the scene" in psp)
+    _check("composite: pov prompt hides no hidden_traits",
+           "unexplained" not in psp.lower())
+    fake_view = {
+        "actors": {"player": {"location_slug": "trailhead"}},
+        "places": {"trailhead": {"name": "Trailhead",
+                                 "description": "A mountain trail."}},
+        "objects": {
+            "o1": {"holder": "place:trailhead", "name": "stone",
+                   "description": "a gray stone"},
+            "o2": {"holder": "actor:player", "name": "bottle",
+                   "description": "a water bottle"},
+        },
+    }
+    psp2 = _scene_prompt_pov(fake_view, "midday")
+    _check("composite: pov visibles exclude player-held objects "
+           "(headcam can't see its own cheek)",
+           "stone" in psp2 and "bottle" not in psp2)
 
     # -- sweep_idle wiring (§2.3): the idle turn is the daily touch, the
     # standalone nudge is fallback-only. Found 2026-10-10: sweep_idle was

@@ -39,7 +39,7 @@ the free-micro-1 layout; override with env vars locally.
                         token (402, 2026-10-07); 'pollinations' is the keyless
                         Pollinations.ai backend (no account, no key, no
                         spend — the flip candidate now awaiting Neil's call).
-    ATFL_COMPOSITE       'v1' (default), 'v2', or 'maponly'. 'v1' =
+    ATFL_COMPOSITE       'v1' (default), 'v2', 'pov', or 'maponly'. 'v1' =
                         three-panel composite (scene, code-drawn map,
                         selfie). 'v2' = single image: scene with the SVG map
                         rasterized into the bottom-left corner, no selfie
@@ -47,7 +47,14 @@ the free-micro-1 layout; override with env vars locally.
                         flip is Neil's call — he approves the overlay proof
                         (goal hidden_files/
                         scene_map_overlay_proof_20261002.jpg); until then v2
-                        stays off and v1 ships. 'maponly' = full-size SVG
+                        stays off and v1 ships. 'pov' = v2 geometry but the
+                        scene is a first-person headcam shot (2026-10-10 POV
+                        proof: the "Headcam still photograph, view through
+                        the hiker's own eyes" framing steered Pollinations
+                        flux to a true eye-level shot; body state stays in
+                        the prose). NOT DEPLOYED until Neil approves the
+                        first-person art direction (digest 2026-10-10) — the
+                        flip is his call. 'maponly' = full-size SVG
                         map as JPEG, no scene generation (2026-10-10: scene
                         images paused per Neil's verdict that the broad
                         landscapes are a concept mismatch, not a tuning
@@ -110,9 +117,10 @@ def load(env=os.environ):
             f"'pollinations', got {images_mode!r}")
 
     composite = env.get("ATFL_COMPOSITE", "v1").strip().lower()
-    if composite not in ("v1", "v2", "maponly"):
+    if composite not in ("v1", "v2", "pov", "maponly"):
         raise ConfigError(
-            f"ATFL_COMPOSITE must be 'v1', 'v2' or 'maponly', got {composite!r}")
+            f"ATFL_COMPOSITE must be 'v1', 'v2', 'pov' or 'maponly', "
+            f"got {composite!r}")
     image_api_key = env.get("ATFL_IMAGE_API_KEY", "").strip() or None
     if images_mode == "real" and not image_api_key:
         raise ConfigError(

@@ -114,6 +114,44 @@ def scene_prompt(view, time_of_day: str) -> str:
     )
 
 
+def _visibles_pov(view, player_loc):
+    """What the player's EYES can see where they stand: place
+    description + nearby objects only. A headcam cannot see its own
+    cheek — actor physical state (the red drop on the cheek, a pose,
+    carried items) stays in the prose and never reaches the scene
+    prompt. POV proof 2026-10-10: feeding body state into the prompt
+    is what hallucinated the red drop into a glowing ground beacon.
+    (Carried objects stay OUT: the model drops small framing details
+    first, and a bottle description in prose costs nothing.)"""
+    loc = view["places"].get(player_loc, {})
+    bits = [loc.get("description") or ""]
+    for o in view["objects"].values():
+        if o["holder"] == f"place:{player_loc}":
+            bits.append(f"{o['name']}: {o['description']}")
+    return "; ".join(b for b in bits if b)
+
+
+def scene_prompt_pov(view, time_of_day: str) -> str:
+    """Scene panel prompt, first-person POV edition (2026-10-10 POV
+    proof): the "Headcam still photograph, view through the hiker's
+    own eyes" framing is what finally steered Pollinations flux to an
+    eye-level trail-into-fog shot instead of a broad landscape —
+    "first-person point of view" alone collapses to a third-person
+    hiker shot. Place + POV visibles only; no people, no text."""
+    player = view["actors"].get("player", {})
+    loc = player.get("location_slug", "trailhead")
+    place = view["places"].get(loc, {})
+    body = _visibles_pov(view, loc)
+    return (
+        "Headcam still photograph, view through the hiker's own eyes, "
+        "camera at eye level, first-person perspective, quiet eerie "
+        f"calm: {place.get('name', 'somewhere')}, {time_of_day} light. "
+        f"Visible now: {body}. "
+        "No other people anywhere in the scene; "
+        "no text, no captions, no watermark."
+    )
+
+
 def selfie_prompt(view, time_of_day: str) -> str:
     """Selfie panel prompt: the player's actor as they look right now
     (pose, carried items, condition)."""
@@ -915,6 +953,95 @@ def build_turn_composite_v2(games_dir, guid, turn_no, provider,
     _store_asset(games_dir, guid, turn_no, "map_svg",
                  svg_text.encode("utf-8"), prompt_text, ext="svg")
     _store_asset(games_dir, guid, turn_no, "composite_v2", jpeg, prompt_text)
+
+    return {
+        "jpeg": jpeg,
+        "scene_prompt": s_prompt,
+        "time_of_day": tod,
+        "overlay_px": overlay_px,
+        "overlay_box": box,
+        "prompt_hash": hashlib.sha256(prompt_text.encode()).hexdigest()[:16],
+        "sent_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# -- POV turn render ----------------------------------------------------------
+#
+# 2026-10-10 (Neil's verdict + POV proof): the generated scene images are
+# PAUSED (maponly) until a provider/prompt serves the narrative — the POV
+# proof showed the headcam framing DOES steer Pollinations flux to a true
+# first-person eye-level shot, so this mode is the candidate for when the
+# art direction is approved. Same v2 geometry (1024px scene, 170px SVG map
+# overlay bottom-left, house palette) so geometry needs no new sign-off;
+# only the scene prompt changes (scene_prompt_pov: headcam framing, what-
+# he-sees-only visibles — body state stays in the prose).
+#
+# WIRED 2026-10-10: mailer._turn_composite calls this builder when
+# images_cfg["composite"] == "pov" (ATFL_COMPOSITE=pov in config).
+# NOT DEPLOYED: the env keeps ATFL_COMPOSITE=maponly until Neil approves
+# the first-person art direction (digest 2026-10-10). Asset kinds carry a
+# "_pov" suffix so draft runs never collide with v1/v2 archive files.
+def build_turn_composite_pov(games_dir, guid, turn_no, provider,
+                             size: int = COMPOSITE_V2_SIZE,
+                             quality: int = COMPOSITE_JPEG_QUALITY,
+                             overlay_px: int = OVERLAY_V2_PX,
+                             margin: int = OVERLAY_V2_MARGIN_PX) -> dict:
+    """Generate the turn's single POV image: headcam scene + SVG map
+    overlay. Mirrors build_turn_composite_v2; only the scene prompt
+    (scene_prompt_pov) and the _pov asset kinds differ.
+
+    Returns {"jpeg": bytes, "scene_prompt": str, "time_of_day": str,
+             "overlay_px": int, "overlay_box": tuple, "prompt_hash": str}.
+    Raises ImageError on any failure — the caller logs it and sends the
+    text-only turn.
+    """
+    try:
+        db = sqlite3.connect(os.path.join(games_dir, f"{guid}.db"))
+        db.row_factory = sqlite3.Row
+        view = filtered_view(db, guid)
+        g = dict(db.execute("SELECT * FROM games WHERE guid=?", (guid,)).fetchone())
+        db.close()
+    except Exception as e:
+        raise ImageError(f"cannot read game state for images: {e}") from e
+    if not g:
+        raise ImageError(f"no game row for {guid}")
+
+    tod = time_of_day_word(g["game_clock_min"])
+    s_prompt = scene_prompt_pov(view, tod)
+
+    try:
+        player_loc = view["actors"]["player"]["location_slug"]
+        discovered = {s: p["name"] for s, p in view["places"].items()
+                      if p["discovered"]}
+        if not discovered:
+            raise ImageError("no discovered places — nothing to draw")
+        edges = [(a, b) for a, b in SCENARIO_EDGES
+                 if a in discovered and b in discovered]
+
+        svg_text = render_map_svg(discovered, edges, player_loc, tod,
+                                  size=OVERLAY_PX, palette=MAP_PALETTE)
+        map_png = rasterize_scaled(svg_text, OVERLAY_PX, overlay_px)
+        scene_jpg = provider.generate_scene(s_prompt, size=size)
+    except (ImageError, MapSvgError):
+        raise
+    except Exception as e:
+        raise ImageError(f"pov image generation failed: {e}") from e
+
+    try:
+        jpeg, box = composite_scene_map(scene_jpg, map_png, overlay_px,
+                                        margin, quality)
+    except Exception as e:
+        raise ImageError(f"pov composite stitch failed: {e}") from e
+
+    # Provenance: scene + svg + composite land in the assets table under
+    # _pov suffixed kinds. The svg file keeps its .svg extension via the
+    # ext parameter.
+    prompt_text = f"SCENE_POV: {s_prompt}\nMAP_SVG: {overlay_px}px overlay"
+    _store_asset(games_dir, guid, turn_no, "scene_pov", scene_jpg, s_prompt)
+    _store_asset(games_dir, guid, turn_no, "map_svg_pov",
+                 svg_text.encode("utf-8"), prompt_text, ext="svg")
+    _store_asset(games_dir, guid, turn_no, "composite_pov", jpeg,
+                 prompt_text)
 
     return {
         "jpeg": jpeg,

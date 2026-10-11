@@ -24,8 +24,8 @@ from server.images import (ImageError, GeminiImageProvider, HFImageProvider,
                            PollinationsImageProvider,
                            StubImageProvider, build_provider,
                            build_turn_composite, get_character_ref,
-                           scene_prompt, selfie_prompt, stitch_composite,
-                           time_of_day_word)
+                           scene_prompt, scene_prompt_pov, selfie_prompt,
+                           stitch_composite, time_of_day_word)
 from server.mailer import (FakeGmail, run_poll_cycle,
                            _resolve_composite_marker)
 from server.murph_relay import build_outbound_envelope
@@ -117,6 +117,25 @@ check("selfie prompt excludes hidden_traits values",
       "unexplained" not in fp.lower())
 check("selfie prompt has pose + time of day",
       "standing" in fp and "dusk" in fp)
+db.close()
+
+# --- 4b. POV scene prompt (2026-10-10 POV proof): headcam framing only,
+# what-he-sees-only visibles, hidden traits never leak ---
+db, guid = fresh_game_db()
+db.execute("UPDATE games SET plot_concept='the earth changing' WHERE guid=?",
+           (guid,))
+view = filtered_view(db, guid)
+pov_sp = scene_prompt_pov(view, "dusk")
+check("pov scene prompt is headcam framing, not cinematic",
+      pov_sp.startswith("Headcam still photograph")
+      and "Cinematic" not in pov_sp)
+check("pov scene prompt names the place + time of day",
+      "Trailhead" in pov_sp and "dusk" in pov_sp)
+check("pov scene prompt excludes hidden_traits + plot concept",
+      "unexplained" not in pov_sp.lower()
+      and "earth changing" not in pov_sp.lower())
+check("pov scene prompt forbids other people outright",
+      "No other people anywhere in the scene" in pov_sp)
 db.close()
 
 # --- 5. composite build on a real game dir: stitch, assets, ref ---

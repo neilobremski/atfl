@@ -113,5 +113,7 @@ check("games-dir/composite overrides honored",
 check("ATFL_COMPOSITE=bogus refused", raises({**BASE, "ATFL_COMPOSITE": "v3"}) is not None)
 check("ATFL_COMPOSITE=maponly honored",
       load({**BASE, "ATFL_COMPOSITE": "maponly"})["composite"] == "maponly")
+check("ATFL_COMPOSITE=pov honored (first-person art direction, 2026-10-10)",
+      load({**BASE, "ATFL_COMPOSITE": "pov"})["composite"] == "pov")
 
 print("\nconfig demo green — startup refuses every half-wired shape.")
